@@ -1,0 +1,25 @@
+{
+  "name": "nexus-mcp-server",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test": "vitest"
+  },
+  "bin": {
+    "nexus-mcp-server": "./dist/server.js"
+  },
+  "dependencies": {
+    "@audiotool/nexus": "^0.0.15",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "abcjs": "^6.6.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.33",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.1"
+  }
+}

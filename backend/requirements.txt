@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+python-multipart
+requests
+anthropic>=0.79.0
+openai>=1.0.0
+mcp>=1.26.0
+google-genai
+langgraph
+elevenlabs
