@@ -10,7 +10,11 @@ from agents.mcp_client_new import (
     SYSTEM_INSTRUCTION,
     _normalize_music_length_ms,
     _normalize_music_prompt,
+    _prepare_anthropic_system,
+    _prepare_anthropic_tools,
+    _resolve_anthropic_model,
 )
+from anthropic import RateLimitError
 from google.genai import types
 
 
@@ -423,3 +427,127 @@ def test_mixing_skill_markdown_includes_source_preservation():
     assert "audiodevice" in text
     assert "get-project-summary" in text
     assert "post-check" in text
+
+
+def test_anthropic_model_defaults_to_sonnet_46(monkeypatch):
+    """Anthropic provider should default to claude-sonnet-4-6."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    client = MCPClient(llm_provider="anthropic")
+    assert client._anthropic_model == "claude-sonnet-4-6"
+    assert _resolve_anthropic_model() == "claude-sonnet-4-6"
+
+
+def test_prepare_anthropic_prompt_cache_blocks(monkeypatch):
+    """Static system/tools should get cache breakpoints when caching is enabled."""
+    monkeypatch.setenv("ANTHROPIC_PROMPT_CACHE", "1")
+    system = _prepare_anthropic_system("static system")
+    assert isinstance(system, list)
+    assert system[0]["cache_control"]["type"] == "ephemeral"
+
+    tools = _prepare_anthropic_tools(
+        [{"name": "a", "description": "d", "input_schema": {"type": "object"}}]
+    )
+    assert tools[0]["cache_control"]["type"] == "ephemeral"
+
+    monkeypatch.setenv("ANTHROPIC_PROMPT_CACHE", "0")
+    assert _prepare_anthropic_system("plain") == "plain"
+    plain_tools = [{"name": "a", "description": "d", "input_schema": {"type": "object"}}]
+    assert _prepare_anthropic_tools(plain_tools) == plain_tools
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_create_retries_on_rate_limit(monkeypatch):
+    """429 responses should be retried before surfacing to the user."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    client = MCPClient(llm_provider="anthropic")
+    client._anthropic_client = AsyncMock()
+
+    ok_response = MagicMock()
+    ok_response.content = [MagicMock(type="text", text="done")]
+
+    rate_error = RateLimitError(
+        "rate limited",
+        response=MagicMock(headers={"retry-after": "0"}),
+        body={"type": "error"},
+    )
+    client._anthropic_client.messages.create = AsyncMock(
+        side_effect=[rate_error, ok_response]
+    )
+
+    with patch("agents.mcp_client_new.asyncio.sleep", new_callable=AsyncMock):
+        response = await client._anthropic_messages_create(
+            model="claude-sonnet-4-6",
+            max_tokens=64,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[{"name": "t", "description": "d", "input_schema": {"type": "object"}}],
+        )
+
+    assert response is ok_response
+    assert client._anthropic_client.messages.create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_tool_loop_anthropic_uses_prompt_cache(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_PROMPT_CACHE", "1")
+    client = MCPClient(llm_provider="anthropic")
+    client._anthropic_client = AsyncMock()
+    ok_response = MagicMock()
+    ok_response.content = [MagicMock(type="text", text="hello")]
+    client._anthropic_client.messages.create = AsyncMock(return_value=ok_response)
+
+    await client.run_tool_loop_anthropic(
+        [{"role": "user", "content": "hi"}],
+        system="scoped-system",
+        tools=[{"name": "t", "description": "d", "input_schema": {"type": "object"}}],
+    )
+
+    kwargs = client._anthropic_client.messages.create.await_args.kwargs
+    assert kwargs["system"] == [
+        {
+            "type": "text",
+            "text": "scoped-system",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    assert kwargs["tools"][-1]["cache_control"]["type"] == "ephemeral"
+
+
+def test_anthropic_model_env_override(monkeypatch):
+    """ANTHROPIC_MODEL env var should override the default."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-4-8")
+    client = MCPClient(llm_provider="anthropic")
+    assert client._anthropic_model == "claude-opus-4-8"
+
+
+def test_system_instruction_includes_music_theory_and_creative_feedback():
+    """Music theory skill and creative feedback behavior should be in the system prompt."""
+    lowered = SYSTEM_INSTRUCTION.lower()
+    assert "00_music_theory.md" in lowered
+    assert "08_tonaljs.md" in lowered
+    assert "chord.detect" in lowered
+    assert "creative feedback" in lowered
+
+
+def test_music_theory_skill_includes_suggestion_workflow():
+    """00_music_theory.md should guide analysis and prioritized suggestions."""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "agents" / "skills" / "00_music_theory.md"
+    text = path.read_text(encoding="utf-8").lower()
+    assert "export-tracks-abc" in text
+    assert "prioritized suggestions" in text or "prioritized" in text
+    assert "modes" in text or "dorian" in text
+
+
+def test_system_instruction_includes_tonaljs_skill_not_duplicate_references():
+    """Tonal.js skill should be in the prompt; raw references/ docs should not be duplicated."""
+    lowered = SYSTEM_INSTRUCTION.lower()
+    assert "08_tonaljs.md" in lowered
+    assert "chord.detect" in lowered
+    assert "progression.fromromannumerals" in lowered
+    assert "tonal.js api reference" not in lowered
+    assert "references/basics/notes.md" not in lowered

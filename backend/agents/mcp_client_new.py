@@ -12,7 +12,7 @@ except Exception:
 
 from google import genai
 from google.genai import types
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, RateLimitError
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 import os
@@ -116,6 +116,9 @@ def load_system_instruction() -> str:
         "When the user wants vocals or specific lyrics performed, pass force_instrumental=false.\n"
         "- If the user is ambiguous and the project already has instruments loaded, prefer ABC "
         "(it slots into their existing tracks).\n"
+        "- When the user asks to change or replace the instrument on existing notes (e.g. bassline "
+        "synth to electric bass guitar), export the notes, call add-abc-track with the new "
+        "instrument and replaceNoteTrackId, and do NOT reuse the old playerEntityId.\n"
         "- Timeline placement for generated audio is done by the Nexus web app only when an "
         "Audiotool project is connected in the sidebar; do not claim the clip is already on "
         "their timeline unless that connection exists.\n\n"
@@ -127,6 +130,13 @@ def load_system_instruction() -> str:
         "Many synths and effects support presets; when the user asks for a tone "
         "change, consider browsing presets for the relevant device rather than "
         "guessing parameters.\n\n"
+
+        "# Creative feedback\n"
+        "When the user asks for suggestions, feedback, or what to change in their project, "
+        "inspect with tools (summary + exported ABC), analyze with Tonal.js concepts from "
+        "08_tonaljs.md (Chord.detect, Scale.detect, Progression, Key), apply 00_music_theory "
+        "for genre and arrangement advice, then give specific prioritized suggestions. Use "
+        "tools to implement changes; do not lecture or rewrite everything unprompted.\n\n"
 
         "# Mastering / mixing safety\n"
         "Before rewiring for mastering, first inspect the project and identify every audible "
@@ -154,24 +164,86 @@ def load_system_instruction() -> str:
     )
     
     skills_dir = os.path.join(os.path.dirname(__file__), "skills")
-    skills_content = ""
-    if os.path.isdir(skills_dir):
-        for filename in sorted(os.listdir(skills_dir)):
-            if filename.endswith(".md"):
-                filepath = os.path.join(skills_dir, filename)
-                try:
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        skills_content += f"--- {filename} ---\n{f.read().strip()}\n\n"
-                except Exception as e:
-                    print(f"[MCP Client] Error loading skill {filename}: {e}")
-                    
-    return base_instruction + "SKILLS AND KNOWLEDGE:\n" + skills_content if skills_content else base_instruction
+    skills_content = _load_skill_markdown_files(skills_dir)
+
+    parts = [base_instruction]
+    if skills_content:
+        parts.append("SKILLS AND KNOWLEDGE:\n" + skills_content)
+    return "".join(parts)
+
+
+def _load_skill_markdown_files(skills_dir: str) -> str:
+    """Load top-level skill *.md files (not subfolders)."""
+    content = ""
+    if not os.path.isdir(skills_dir):
+        return content
+    for filename in sorted(os.listdir(skills_dir)):
+        if not filename.endswith(".md"):
+            continue
+        filepath = os.path.join(skills_dir, filename)
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content += f"--- {filename} ---\n{f.read().strip()}\n\n"
+        except Exception as e:
+            print(f"[MCP Client] Error loading skill {filename}: {e}")
+    return content
 
 SYSTEM_INSTRUCTION = load_system_instruction()
 
 
 _PROVIDER_LABELS = {"gemini": "Gemini", "anthropic": "Anthropic", "openai": "OpenAI"}
 _ENV_KEYS = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+_DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
+
+
+def _resolve_anthropic_model() -> str:
+    model = (os.getenv("ANTHROPIC_MODEL") or _DEFAULT_ANTHROPIC_MODEL).strip()
+    return model or _DEFAULT_ANTHROPIC_MODEL
+
+
+def _anthropic_prompt_cache_enabled() -> bool:
+    flag = (os.getenv("ANTHROPIC_PROMPT_CACHE") or "1").strip().lower()
+    return flag not in ("0", "false", "no", "off")
+
+
+def _prepare_anthropic_system(
+    system: str | list[dict[str, Any]],
+) -> str | list[dict[str, Any]]:
+    """Wrap static system text with a cache breakpoint when caching is enabled."""
+    if isinstance(system, list) or not _anthropic_prompt_cache_enabled():
+        return system
+    return [
+        {
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
+def _prepare_anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark the last tool so tools + system can be served from Anthropic prompt cache."""
+    if not tools or not _anthropic_prompt_cache_enabled():
+        return tools
+    prepared = [{**tool} for tool in tools]
+    prepared[-1] = {
+        **prepared[-1],
+        "cache_control": {"type": "ephemeral"},
+    }
+    return prepared
+
+
+def _anthropic_rate_limit_retry_delay(exc: Exception, default_seconds: float) -> float:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) if response is not None else None
+    if headers:
+        retry_after = headers.get("retry-after") or headers.get("Retry-After")
+        if retry_after is not None:
+            try:
+                return max(float(retry_after), 1.0)
+            except (TypeError, ValueError):
+                pass
+    return default_seconds
 
 
 def _resolve_llm_api_key(
@@ -214,7 +286,7 @@ class MCPClient:
             self._gemini_client = None
             self._gemini_model = None
             self._anthropic_client = AsyncAnthropic(api_key=self._llm_api_key)
-            self._anthropic_model = "claude-sonnet-4-20250514"
+            self._anthropic_model = _resolve_anthropic_model()
             self._openai_client = None
             self._openai_model = None
         else:
@@ -226,6 +298,46 @@ class MCPClient:
             self._openai_model = "gpt-4o"
 
         self._elevenlabs_api_key: Optional[str] = None
+
+    async def _anthropic_messages_create(
+        self,
+        *,
+        model: str,
+        max_tokens: int,
+        system: str | list[dict[str, Any]],
+        messages: list,
+        tools: Optional[list[dict[str, Any]]] = None,
+    ):
+        """Call Anthropic messages.create with prompt caching and 429 retries."""
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": _prepare_anthropic_system(system),
+            "messages": messages,
+        }
+        if tools is not None:
+            kwargs["tools"] = _prepare_anthropic_tools(tools)
+
+        retry_delays = (2.0, 5.0, 12.0)
+        last_error: Optional[Exception] = None
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                return await self._anthropic_client.messages.create(**kwargs)
+            except RateLimitError as exc:
+                last_error = exc
+                if attempt >= len(retry_delays):
+                    raise
+                delay = _anthropic_rate_limit_retry_delay(
+                    exc, retry_delays[attempt]
+                )
+                print(
+                    f"[MCP Client] Anthropic rate limit (429); "
+                    f"retrying in {delay:.0f}s (attempt {attempt + 1})"
+                )
+                await asyncio.sleep(delay)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Anthropic messages.create failed without an error")
 
     def set_elevenlabs_api_key(self, key: Optional[str]) -> None:
         """Per-request key from the client; falls back to ELEVENLABS_API_KEY in the tool."""
@@ -655,7 +767,7 @@ class MCPClient:
         consecutive_failures = 0
         _MAX_CONSECUTIVE_FAILURES = 3
         for _ in range(max_iterations):
-            response = await self._anthropic_client.messages.create(
+            response = await self._anthropic_messages_create(
                 model=self._anthropic_model,
                 max_tokens=4096,
                 system=system,

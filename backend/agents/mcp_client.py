@@ -7,8 +7,16 @@ from mcp.client.stdio import stdio_client
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
+import os
 
 load_dotenv()  # load environment variables from .env
+
+_DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
+
+
+def _anthropic_model() -> str:
+    model = (os.getenv("ANTHROPIC_MODEL") or _DEFAULT_ANTHROPIC_MODEL).strip()
+    return model or _DEFAULT_ANTHROPIC_MODEL
 
 class MCPClient:
     def __init__(self):
@@ -65,7 +73,7 @@ async def process_query(self, query: str) -> str:
 
     # Initial Claude API call
     response = self.anthropic.messages.create(
-        model="claude-sonnet-4-20250514",
+        model=_anthropic_model(),
         max_tokens=1000,
         messages=messages,
         tools=available_tools
@@ -105,7 +113,7 @@ async def process_query(self, query: str) -> str:
 
             # Get next response from Claude
             response = self.anthropic.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=_anthropic_model(),
                 max_tokens=1000,
                 messages=messages,
                 tools=available_tools

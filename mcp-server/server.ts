@@ -29,6 +29,8 @@ import {
   levenshtein,
   resolveEntityType,
   resolveInstrumentType,
+  resolveInstrumentTypeForAbcTrack,
+  getAbcTrackPlayerMismatchError,
   resolveGmInstrumentSlug,
   resolveGmInstrumentSlugFromHints,
   resolveGmDrumSlug,
@@ -939,6 +941,9 @@ srv.registerTool(
       "CRITICAL: abcNotation MUST use newline-separated lines for the header (standard ABC), e.g.",
       "X:1\\nT:Title\\nM:4/4\\nK:G\\n|:GABc| — do NOT put the whole header on one line with spaces.",
       "Orchestral: use instrument=french horn (etc.) or orchestralVoice; do not use instrument=gakki alone (defaults to piano).",
+      "Bass guitar / electric bass: use instrument='electric bass guitar' or 'fingered bass' (creates gakki with GM bass preset).",
+      "Instrument swap: when replacing an existing note track with a new sound, pass replaceNoteTrackId (and omit playerEntityId).",
+      "The old note track and its unused player device are removed after the new track is created.",
       "Other instruments: heisenberg, bassline, pulsar, kobolt, space, gakki,",
       "pulverisateur, tonematrix, machiniste, beatbox8, beatbox9, matrixArpeggiator, etc.",
     ].join(" "),
@@ -949,7 +954,18 @@ srv.registerTool(
         .describe("Full ABC tune string (single mode)."),
       instrument: z.string().optional().describe("Sound/device for the note player (single mode). Default: heisenberg."),
       orchestralVoice: z.string().optional().describe("Specific orchestral voice for Gakki presets (single mode)."),
-      playerEntityId: z.string().optional().describe("ID of existing instrument to use (single mode)."),
+      playerEntityId: z.string().optional().describe("ID of existing instrument to use (single mode). Do not use when changing instrument type."),
+      replaceNoteTrackId: z
+        .string()
+        .optional()
+        .describe(
+          "After creating the new track, remove this note track and its player device if unused. Use when swapping instruments (omit playerEntityId).",
+        ),
+      removeOldPlayer: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe("When replaceNoteTrackId is set, also remove the old player device if no other tracks use it."),
       x: z.number().optional().describe("X position for new instrument (single mode)"),
       y: z.number().optional().describe("Y position for new instrument (single mode)"),
       autoConnectToMixer: z.boolean().optional().default(true).describe("Whether to auto-connect to mixer. Set false for mastering chains."),
@@ -958,6 +974,15 @@ srv.registerTool(
         instrument: z.string().optional().describe("Sound/device for the note player"),
         orchestralVoice: z.string().optional().describe("Specific orchestral voice for Gakki presets"),
         playerEntityId: z.string().optional().describe("ID of existing instrument to use"),
+        replaceNoteTrackId: z
+          .string()
+          .optional()
+          .describe("Remove this note track (and unused player) after creating the new track."),
+        removeOldPlayer: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe("When replaceNoteTrackId is set, remove the old player if unused."),
         x: z.number().optional().describe("X position for new instrument"),
         y: z.number().optional().describe("Y position for new instrument"),
         autoConnectToMixer: z.boolean().optional().default(true).describe("Whether to auto-connect to mixer"),
@@ -969,6 +994,8 @@ srv.registerTool(
     instrument?: string;
     orchestralVoice?: string;
     playerEntityId?: string;
+    replaceNoteTrackId?: string;
+    removeOldPlayer?: boolean;
     x?: number;
     y?: number;
     autoConnectToMixer?: boolean;
@@ -977,6 +1004,8 @@ srv.registerTool(
       instrument?: string;
       orchestralVoice?: string;
       playerEntityId?: string;
+      replaceNoteTrackId?: string;
+      removeOldPlayer?: boolean;
       x?: number;
       y?: number;
       autoConnectToMixer?: boolean;
@@ -990,6 +1019,8 @@ srv.registerTool(
             instrument: args.instrument,
             orchestralVoice: args.orchestralVoice,
             playerEntityId: args.playerEntityId,
+            replaceNoteTrackId: args.replaceNoteTrackId,
+            removeOldPlayer: args.removeOldPlayer,
             x: args.x,
             y: args.y,
             autoConnectToMixer: args.autoConnectToMixer,
@@ -1005,11 +1036,18 @@ srv.registerTool(
         notes: Array<{ positionTicks: number; durationTicks: number; pitch: number; velocity: number }>;
         instrumentType: string;
         gakkiPreset: unknown | undefined;
+        instrument?: string;
+        orchestralVoice?: string;
+        abcNotation: string;
         playerEntityId?: string;
+        replaceNoteTrackId?: string;
+        removeOldPlayer: boolean;
         x?: number;
         y?: number;
         autoConnectToMixer?: boolean;
       }> = [];
+
+      const replacementTargets: Array<{ noteTrackId: string; removeOldPlayer: boolean }> = [];
 
       for (const item of trackItems) {
         const notes = parseAbcToNotes(item.abcNotation);
@@ -1017,7 +1055,17 @@ srv.registerTool(
           throw new Error("No notes found in ABC notation");
         }
 
-        const instrumentType = resolveInstrumentType(item.instrument ?? "heisenberg") ?? "heisenberg";
+        if (item.replaceNoteTrackId && item.playerEntityId) {
+          throw new Error(
+            "Do not pass playerEntityId when replaceNoteTrackId is set — a new instrument will be created.",
+          );
+        }
+
+        const instrumentType = resolveInstrumentTypeForAbcTrack({
+          instrument: item.instrument,
+          orchestralVoice: item.orchestralVoice,
+          abcNotation: normalizeAbcNotation(item.abcNotation),
+        });
 
         let gakkiPreset: unknown | undefined = undefined;
         if (!item.playerEntityId && instrumentType === "gakki") {
@@ -1044,11 +1092,33 @@ srv.registerTool(
           notes,
           instrumentType,
           gakkiPreset,
+          instrument: item.instrument,
+          orchestralVoice: item.orchestralVoice,
+          abcNotation: item.abcNotation,
           playerEntityId: item.playerEntityId,
+          replaceNoteTrackId: item.replaceNoteTrackId,
+          removeOldPlayer: item.removeOldPlayer !== false,
           x: item.x,
           y: item.y,
           autoConnectToMixer: item.autoConnectToMixer,
         });
+
+        if (item.replaceNoteTrackId) {
+          replacementTargets.push({
+            noteTrackId: item.replaceNoteTrackId,
+            removeOldPlayer: item.removeOldPlayer !== false,
+          });
+        }
+      }
+
+      const preModifyEntities = doc.queryEntities.get();
+      const oldPlayersByTrack = new Map<string, string | null>();
+      for (const target of replacementTargets) {
+        const oldTrack = preModifyEntities.find((e) => e.id === target.noteTrackId);
+        if (!oldTrack) {
+          throw new Error(`Note track ${target.noteTrackId} not found for replacement.`);
+        }
+        oldPlayersByTrack.set(target.noteTrackId, refId((oldTrack.fields as any).player));
       }
 
       const result = await doc.modify((t) => {
@@ -1063,6 +1133,15 @@ srv.registerTool(
               const playerEntity = t.entities.getEntity(item.playerEntityId);
               if (!playerEntity) {
                 return { error: `Player entity ${item.playerEntityId} not found` };
+              }
+              const mismatch = getAbcTrackPlayerMismatchError({
+                playerEntityType: playerEntity.entityType,
+                instrument: item.instrument,
+                orchestralVoice: item.orchestralVoice,
+                abcNotation: item.abcNotation,
+              });
+              if (mismatch) {
+                return { error: mismatch };
               }
               playerLocation = playerEntity as any;
               resolvedPlayerEntityId = item.playerEntityId;
@@ -1155,6 +1234,20 @@ srv.registerTool(
               noteCount: item.notes.length,
               playerEntityId: resolvedPlayerEntityId,
             });
+
+            if (item.replaceNoteTrackId) {
+              const oldPlayerId = oldPlayersByTrack.get(item.replaceNoteTrackId) ?? null;
+              t.removeWithDependencies(item.replaceNoteTrackId);
+              if (item.removeOldPlayer && oldPlayerId) {
+                const stillUsed = t.entities
+                  .ofTypes("noteTrack" as any)
+                  .get()
+                  .some((nt: any) => refId(nt.fields?.player) === oldPlayerId);
+                if (!stillUsed) {
+                  t.removeWithDependencies(oldPlayerId);
+                }
+              }
+            }
           }
 
           return { ok: true, tracks: trackResults };
@@ -2071,10 +2164,9 @@ srv.registerTool(
   {
     description: [
       "Read existing note tracks from the project and export their note content as ABC notation.",
-      "This lets you see what melodies, chords, and rhythms already exist in the project.",
-      "Use this to analyze musical content before generating complementary parts,",
-      "or to understand the key, scale, and chord progression of existing music.",
-      "Returns one ABC block per note track, including the instrument type.",
+      "Returns one ABC block per note track (headers M:/Q:/K:, note body, instrument type).",
+      "Use the export as input for your own harmonic/rhythmic analysis (e.g. Tonal.js concepts);",
+      "this tool does not detect key, chords, or progressions.",
     ].join(" "),
     inputSchema: z.object({
       noteTrackId: z

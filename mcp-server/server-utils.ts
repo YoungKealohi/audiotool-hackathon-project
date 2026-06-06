@@ -108,6 +108,12 @@ export const ENTITY_TYPE_ALIASES: Record<string, string> = {
   "double bass": "gakki",
   "upright bass": "gakki",
   "acoustic bass": "gakki",
+  "bass guitar": "gakki",
+  "electric bass": "gakki",
+  "electric bass guitar": "gakki",
+  "fingered bass": "gakki",
+  "picked bass": "gakki",
+  "fretless bass": "gakki",
   trumpet: "gakki",
   trombone: "gakki",
   tuba: "gakki",
@@ -221,6 +227,12 @@ export const INSTRUMENT_ALIASES: Record<string, string> = {
   viola: "gakki",
   cello: "gakki",
   piano: "gakki",
+  "bass guitar": "gakki",
+  "electric bass": "gakki",
+  "electric bass guitar": "gakki",
+  "fingered bass": "gakki",
+  "picked bass": "gakki",
+  "fretless bass": "gakki",
   "808": "beatbox8",
   "909": "beatbox9",
   modular: "pulverisateur",
@@ -357,6 +369,51 @@ export function resolveInstrumentType(input: string): string | null {
   return bestDist <= 3 ? best : null;
 }
 
+/** Resolve the note-player device type for add-abc-track (GM names → gakki when appropriate). */
+export function resolveInstrumentTypeForAbcTrack(args: {
+  instrument?: string;
+  orchestralVoice?: string;
+  abcNotation?: string;
+}): string {
+  const raw = args.instrument?.trim();
+  if (raw) {
+    const lower = raw.toLowerCase();
+    const alias = INSTRUMENT_ALIASES[lower];
+    // Synth aliases (bass → bassline, acid → bassline) beat GM slug synonyms.
+    if (alias && alias !== "gakki") return alias;
+    if (NOTE_TRACK_INSTRUMENTS.includes(lower as (typeof NOTE_TRACK_INSTRUMENTS)[number]) && lower !== "gakki") {
+      return lower;
+    }
+  }
+  if (resolveGmInstrumentSlugFromHints(args)) return "gakki";
+  if (!raw) return "heisenberg";
+  return resolveInstrumentType(raw) ?? "heisenberg";
+}
+
+/**
+ * When reusing an existing player, block routing a different instrument family
+ * onto it (e.g. electric bass guitar → existing bassline synth).
+ */
+export function getAbcTrackPlayerMismatchError(args: {
+  playerEntityType: string;
+  instrument?: string;
+  orchestralVoice?: string;
+  abcNotation?: string;
+}): string | null {
+  if (!args.instrument?.trim() && !args.orchestralVoice?.trim()) return null;
+  const requestedType = resolveInstrumentTypeForAbcTrack({
+    instrument: args.instrument,
+    orchestralVoice: args.orchestralVoice,
+    abcNotation: args.abcNotation,
+  });
+  if (args.playerEntityType === requestedType) return null;
+  const label = args.instrument?.trim() || args.orchestralVoice?.trim() || requestedType;
+  return (
+    `Cannot add "${label}" to an existing ${args.playerEntityType} player. ` +
+    "Omit playerEntityId to create a new instrument, or pass replaceNoteTrackId to swap the track."
+  );
+}
+
 /**
  * Canonical GM instrument slugs accepted by `client.presets.getInstrument()`.
  * Backed by the pinned-GM-1.0 table above.
@@ -421,6 +478,8 @@ export const GM_INSTRUMENT_SLUG_SYNONYMS: Record<string, GmInstrumentSlug> = {
   "acoustic-guitar": "nylon-guitar",
   "electric-guitar": "clean-guitar",
   "bass-guitar": "fingered-bass",
+  "electric-bass": "fingered-bass",
+  "electric-bass-guitar": "fingered-bass",
   bass: "fingered-bass",
   "steel-guitar": "dark-steel-guitar",
   // Organs & misc
@@ -489,6 +548,13 @@ export const GM_INSTRUMENT_TEXT_PATTERNS: ReadonlyArray<{
   { pattern: /\bpizzicato\s+strings?\b/i, slug: "pizzicato-strings" },
   { pattern: /\btremolo\s+strings?\b/i, slug: "tremolo-strings" },
   { pattern: /\belectric\s+piano\b/i, slug: "electronic-piano-1" },
+  { pattern: /\belectric\s+bass(?:\s+guitar)?\b/i, slug: "fingered-bass" },
+  { pattern: /\bbass\s+guitar\b/i, slug: "fingered-bass" },
+  { pattern: /\bfingered\s+bass\b/i, slug: "fingered-bass" },
+  { pattern: /\bpicked\s+bass\b/i, slug: "picked-bass" },
+  { pattern: /\bfretless\s+bass\b/i, slug: "fretless-bass" },
+  { pattern: /\bslap\s+bass\b/i, slug: "slap-bass-1" },
+  { pattern: /\bacoustic\s+bass\b/i, slug: "acoustic-bass" },
   { pattern: /\bacoustic\s+piano\b/i, slug: "acoustic-piano" },
   { pattern: /\bgrand\s+piano\b/i, slug: "acoustic-piano" },
   { pattern: /\bhonky[\s-]tonk\b/i, slug: "honky-tonk-piano" },

@@ -8,6 +8,8 @@ import {
   levenshtein,
   resolveEntityType,
   resolveInstrumentType,
+  resolveInstrumentTypeForAbcTrack,
+  getAbcTrackPlayerMismatchError,
   resolveGmInstrumentSlug,
   resolveGmInstrumentSlugFromHints,
   resolveGmDrumSlug,
@@ -147,6 +149,34 @@ describe('Instrument Type Resolution', () => {
 
   it('should return null for unknown instruments', () => {
     expect(resolveInstrumentType('totallyunknown')).toBeNull();
+  });
+
+  it('should resolve bass guitar names to gakki for ABC tracks', () => {
+    expect(resolveInstrumentTypeForAbcTrack({ instrument: 'electric bass guitar' })).toBe('gakki');
+    expect(resolveInstrumentTypeForAbcTrack({ instrument: 'bass guitar' })).toBe('gakki');
+    expect(resolveInstrumentTypeForAbcTrack({ instrument: 'fingered bass' })).toBe('gakki');
+    expect(resolveInstrumentTypeForAbcTrack({ instrument: 'bass' })).toBe('bassline');
+    expect(resolveInstrumentTypeForAbcTrack({ instrument: 'bass synth' })).toBe('bassline');
+  });
+
+  it('should block routing a new instrument family onto an existing player', () => {
+    expect(
+      getAbcTrackPlayerMismatchError({
+        playerEntityType: 'bassline',
+        instrument: 'electric bass guitar',
+      }),
+    ).toMatch(/Cannot add/);
+    expect(
+      getAbcTrackPlayerMismatchError({
+        playerEntityType: 'gakki',
+        instrument: 'electric bass guitar',
+      }),
+    ).toBeNull();
+    expect(
+      getAbcTrackPlayerMismatchError({
+        playerEntityType: 'bassline',
+      }),
+    ).toBeNull();
   });
 });
 
