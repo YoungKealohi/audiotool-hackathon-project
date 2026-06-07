@@ -1,18 +1,20 @@
 # Nexus Agent
 
-Repository for csci-4911 project 3; created by Jhun Baclaan, Kealohi Young, Joshua Leonard, and Adriane Fiesta
+Project for the Audiotool Hackathon by **[@watwaba](https://github.com/watwaba)** and **[@YoungKealohi](https://github.com/YoungKealohi)**
+
+Nexus Agent is an AI assistant for [Audiotool](https://www.audiotool.com/) projects. It connects to the DAW through an MCP server, reads and edits note tracks, devices, and mixer routing, and can suggest musical improvements grounded in project content.
 
 For **AI agents and automation**: use the conda environment and conventions in [AGENTS.md](AGENTS.md).
 
 ## Project layout
 
 | Path | What it is |
-|------|------------|
-| **`backend/`** | FastAPI app (`main.py`): agent graph, MCP client wiring, HTTP/SSE routes. Python unit tests live in `backend/tests/` (pytest). |
-| **`frontend/`** | React + Vite web UI (`npm run dev`, `npm run build`). Vitest runs unit tests for this app. |
-| **`mcp-server/`** | TypeScript MCP server: `npm run build` then `npm start`. Vitest runs this package’s tests. |
-| **`e2e/`** | Playwright end-to-end tests; expects the full stack running locally. Separate `package.json` — install deps here before running E2E. |
-| **`scripts/`** | **`run_all_tests.py`** — supported entrypoint to run all test suites and write reports under `test-results/`. |
+| --- | --- |
+| `backend/` | FastAPI app (`main.py`): agent graph, MCP client wiring, HTTP/SSE routes. Agent skills live in `backend/agents/skills/`. Python unit tests in `backend/tests/` (pytest). |
+| `frontend/` | React + Vite web UI (`npm run dev`, `npm run build`). Vitest runs unit tests for this app. |
+| `mcp-server/` | TypeScript MCP server: `npm run build` then `npm start`. Talks to Audiotool via `@audiotool/nexus`. Vitest runs this package’s tests. |
+| `e2e/` | Playwright end-to-end tests; expects the full stack running locally. Separate `package.json` — install deps here before running E2E. |
+| `scripts/` | `run_all_tests.py` — supported entrypoint to run all test suites and write reports under `test-results/`. |
 
 ## Environment
 
@@ -27,18 +29,57 @@ For **AI agents and automation**: use the conda environment and conventions in [
 conda env create -f environment.yml
 conda activate NexusAgent
 
-# 2. Install Python packages with uv
+# 2. Copy env template and fill in API keys
+cp .env.example .env   # Windows: copy .env.example .env
+
+# 3. Install Python packages with uv
 cd backend && uv pip install -r requirements.txt
 
-# 3. Install frontend dependencies
+# 4. Install frontend dependencies
 cd ../frontend && npm install
 
-# 4. Install MCP server dependencies
+# 5. Install MCP server dependencies
 cd ../mcp-server && npm install
 
-# 5. (Optional) E2E tests — only needed if you run Playwright / full unified test suite
+# 6. (Optional) E2E tests — only needed if you run Playwright / full unified test suite
 cd ../e2e && npm install
 ```
+
+## Configuration
+
+Copy [`.env.example`](.env.example) to `.env` at the repository root. Do not commit `.env`.
+
+| Variable | Purpose |
+| --- | --- |
+| `GEMINI_API_KEY` | Google Gemini (default provider in the UI) |
+| `ANTHROPIC_API_KEY` | Anthropic Claude |
+| `OPENAI_API_KEY` | OpenAI GPT |
+| `ANTHROPIC_MODEL` | Optional. Defaults to `claude-sonnet-4-6` (e.g. `claude-opus-4-8`) |
+| `ANTHROPIC_PROMPT_CACHE` | Optional. `1` (default) caches the large system prompt and tool schemas to reduce Anthropic rate-limit errors; set `0` to disable |
+| `ELEVENLABS_API_KEY` | AI music generation (`generate-music` tool) |
+| `AUDIOTOOL_CLIENT_ID` | Audiotool OAuth (frontend) |
+| `MCP_SERVER_URL` / `MCP_SERVER_PATH` | How the backend reaches the MCP server (HTTP URL or local script path) |
+
+Users can also enter LLM and ElevenLabs keys in the app **Settings** panel; per-request keys override env values when provided.
+
+## Agent capabilities
+
+The backend loads markdown **skills** from `backend/agents/skills/` into the system prompt. Highlights:
+
+- **DAW workflows** — adding sounds, editing arrangements, mixing, mastering, project analysis
+- **Music theory & suggestions** — `00_music_theory.md` for creative feedback and genre-aware advice
+- **Tonal.js reasoning** — `08_tonaljs.md` for chord/scale/progression analysis (applied conceptually to exported ABC; not executed in code)
+- **MCP tools** — read/write the live project (`get-project-summary`, `export-tracks-abc`, `add-abc-track`, presets, cables, etc.)
+
+Upstream Tonal.js docs are mirrored under `backend/agents/skills/references/` for maintainers; only the skill files are loaded into the agent prompt.
+
+**LLM defaults** (when selected in Settings):
+
+| Provider | Model |
+| --- | --- |
+| Gemini | `gemini-2.5-flash` |
+| Anthropic | `claude-sonnet-4-6` (override with `ANTHROPIC_MODEL`) |
+| OpenAI | `gpt-4o` |
 
 ## Run
 
@@ -59,13 +100,13 @@ E2E and full-stack testing expect these services (and a configured `.env` where 
 
 ### Windows (optional one-shot)
 
-On **PowerShell**, after `conda activate NexusAgent` (required so **`CONDA_PREFIX`** points at this env), from the **repository root**:
+On **PowerShell**, after `conda activate NexusAgent` (required so `CONDA_PREFIX` points at this env), from the **repository root**:
 
 ```powershell
 .\scripts\run-all.ps1
 ```
 
-This runs **`npm run build`** in `mcp-server/`, then starts the backend (`python main.py`), frontend (`npm run dev`), and MCP server (`npm run start`) in **separate new windows**. Prefer the three-terminal flow above if anything fails or you are not on Windows.
+This runs `npm run build` in `mcp-server/`, then starts the backend (`python main.py`), frontend (`npm run dev`), and MCP server (`npm run start`) in **separate new windows**. Prefer the three-terminal flow above if anything fails or you are not on Windows.
 
 ## Testing
 
@@ -87,7 +128,7 @@ python scripts/run_all_tests.py
 
 This runs, in order: **backend** (pytest), **mcp-server** (Vitest), **frontend** (Vitest), **e2e** (Playwright).
 
-- **`--skip-e2e`** — skip Playwright when the stack is not running or you only changed non-E2E code.
+- `--skip-e2e` — skip Playwright when the stack is not running or you only changed non-E2E code.
 - **Outputs:** `test-results/UNIFIED_TEST_REPORT.md` and per-component JUnit XML under `test-results/*-junit.xml`.
 
 ### Focused runs (single area)
@@ -106,7 +147,7 @@ cd e2e && npx playwright test
 
 ### E2E prerequisites
 
-Playwright tests assume the **backend**, **frontend**, and (for realistic flows) **MCP server** are running with `conda activate NexusAgent`. Bring the stack up using **Run** (three terminals) or, on Windows, optionally **`.\scripts\run-all.ps1`** after activation (see **Run** — Windows optional one-shot).
+Playwright tests assume the **backend**, **frontend**, and (for realistic flows) **MCP server** are running with `conda activate NexusAgent`. Bring the stack up using **Run** (three terminals) or, on Windows, optionally `.\scripts\run-all.ps1` after activation (see **Run** — Windows optional one-shot).
 
 ## Updating Dependencies
 
