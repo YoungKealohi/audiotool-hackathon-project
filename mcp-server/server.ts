@@ -25,6 +25,7 @@ import {
   AUDIO_OUTPUT_FIELD,
   TICKS_WHOLE,
   TICKS_QUARTER,
+  ticksPerBar,
   STYLE_MAP,
   levenshtein,
   resolveEntityType,
@@ -33,6 +34,7 @@ import {
   getAbcTrackPlayerMismatchError,
   resolveGmInstrumentSlug,
   resolveGmInstrumentSlugFromHints,
+  resolveStrudelTrackInstrument,
   resolveGmDrumSlug,
   isGmInstrumentSlug,
   isGmDrumSlug,
@@ -44,6 +46,11 @@ import {
   recommendEntityForStyle,
   refId,
 } from "./server-utils.js";
+import {
+  parseStrudelToNotes,
+  normalizeStrudelCode,
+  inferInstrumentFromStrudelCode,
+} from "./strudel-utils.js";
 
 // ---------------------------------------------------------------------------
 // Active session — at most one at a time.  Each session owns its own
@@ -417,6 +424,26 @@ async function getDocument(): Promise<SyncedDocument> {
   return document;
 }
 
+type ProjectTimingConfig = {
+  tempoBpm?: number;
+  timeSignatureNum: number;
+  timeSignatureDen: number;
+};
+
+async function readProjectTimingConfig(): Promise<ProjectTimingConfig> {
+  const doc = await getDocument();
+  const configEntity = doc.queryEntities.get().find((e) => e.entityType === "config");
+  const cf = configEntity?.fields as Record<string, { value?: number }> | undefined;
+  const timeSignatureNum = cf?.signatureNumerator?.value ?? 4;
+  const timeSignatureDen = cf?.signatureDenominator?.value ?? 4;
+  const tempoBpm = cf?.tempoBpm?.value;
+  return {
+    tempoBpm: tempoBpm != null ? tempoBpm : undefined,
+    timeSignatureNum,
+    timeSignatureDen,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tool registration — called once per McpServer instance.  In HTTP mode a
 // fresh McpServer is created for every session, so this runs each time a new
@@ -438,6 +465,197 @@ export function isLikelySocket(field: unknown): boolean {
   if (!field || typeof field !== "object") return false;
   const f = field as Record<string, unknown>;
   return "location" in f && "fields" in f && !("value" in f);
+}
+
+type PreparedNoteTrackPayload = {
+  notes: Array<{ positionTicks: number; durationTicks: number; pitch: number; velocity: number }>;
+  instrumentType: string;
+  gakkiPreset: unknown | undefined;
+  instrument?: string;
+  orchestralVoice?: string;
+  abcNotation: string;
+  playerEntityId?: string;
+  replaceNoteTrackId?: string;
+  removeOldPlayer: boolean;
+  x?: number;
+  y?: number;
+  autoConnectToMixer?: boolean;
+};
+
+async function commitPreparedNoteTracks(
+  prepared: PreparedNoteTrackPayload[],
+  replacementTargets: Array<{ noteTrackId: string; removeOldPlayer: boolean }>,
+): Promise<Array<{ noteTrackId: string; noteCount: number; playerEntityId: string }>> {
+  const doc = await getDocument();
+  const preModifyEntities = doc.queryEntities.get();
+  const oldPlayersByTrack = new Map<string, string | null>();
+  for (const target of replacementTargets) {
+    const oldTrack = preModifyEntities.find((e) => e.id === target.noteTrackId);
+    if (!oldTrack) {
+      throw new Error(`Note track ${target.noteTrackId} not found for replacement.`);
+    }
+    oldPlayersByTrack.set(target.noteTrackId, refId((oldTrack.fields as any).player));
+  }
+
+  const result = await doc.modify((t) => {
+    try {
+      const trackResults: Array<{ noteTrackId: string; noteCount: number; playerEntityId: string }> = [];
+
+      for (const item of prepared) {
+        let playerLocation: { location: { id: string } };
+        let resolvedPlayerEntityId: string;
+
+        if (item.playerEntityId) {
+          const playerEntity = t.entities.getEntity(item.playerEntityId);
+          if (!playerEntity) {
+            return { error: `Player entity ${item.playerEntityId} not found` };
+          }
+          const mismatch = getAbcTrackPlayerMismatchError({
+            playerEntityType: playerEntity.entityType,
+            instrument: item.instrument,
+            orchestralVoice: item.orchestralVoice,
+            abcNotation: item.abcNotation,
+          });
+          if (mismatch) {
+            return { error: mismatch };
+          }
+          playerLocation = playerEntity as any;
+          resolvedPlayerEntityId = item.playerEntityId;
+        } else {
+          const posX = item.x ?? autoLayoutOffset * 120;
+          const posY = item.y ?? 0;
+          autoLayoutOffset++;
+          const displayName = `${item.instrumentType} ${autoLayoutOffset}`;
+
+          let player: any;
+          if (item.instrumentType === "gakki" && item.gakkiPreset !== undefined) {
+            player = (t as any).createDeviceFromPreset(item.gakkiPreset);
+            if (!player) {
+              return { error: `Failed to create gakki from preset` };
+            }
+            const fields = player.fields as any;
+            if (fields?.positionX) t.update(fields.positionX, posX);
+            if (fields?.positionY) t.update(fields.positionY, posY);
+            if (fields?.displayName) t.update(fields.displayName, displayName);
+          } else {
+            player = t.create(item.instrumentType as any, {
+              positionX: posX,
+              positionY: posY,
+              displayName,
+            });
+            if (!player) {
+              return { error: `Failed to create ${item.instrumentType} instrument` };
+            }
+          }
+
+          if (item.autoConnectToMixer !== false) {
+            connectDeviceToStagebox(t, player, item.instrumentType);
+          }
+          if (item.instrumentType === "heisenberg") {
+            setHeisenbergOperatorAGain(t, player, 0.5);
+          }
+          playerLocation = player as any;
+          resolvedPlayerEntityId = (player as any).id;
+        }
+
+        const existingTracks = t.entities
+          .ofTypes("noteTrack" as any, "audioTrack" as any, "automationTrack" as any, "patternTrack" as any)
+          .get();
+        const maxTrackOrder = existingTracks.reduce((max: number, tr: any) => {
+          const order = (tr.fields as any).orderAmongTracks?.value ?? 0;
+          return Math.max(max, order);
+        }, -1);
+
+        const noteTrack = t.create("noteTrack" as any, {
+          orderAmongTracks: maxTrackOrder + 1,
+          player: playerLocation.location,
+        });
+        if (!noteTrack) return { error: "Failed to create NoteTrack" };
+
+        const noteCollection = t.create("noteCollection" as any, {});
+        if (!noteCollection) return { error: "Failed to create NoteCollection" };
+
+        const lastNote = item.notes[item.notes.length - 1];
+        const regionEnd = lastNote.positionTicks + lastNote.durationTicks;
+        const regionDuration = Math.max(regionEnd, TICKS_WHOLE);
+
+        const noteRegion = t.create("noteRegion" as any, {
+          track: (noteTrack as any).location,
+          collection: (noteCollection as any).location,
+          region: {
+            positionTicks: 0,
+            durationTicks: regionDuration,
+            loopDurationTicks: regionDuration,
+            collectionOffsetTicks: 0,
+            loopOffsetTicks: 0,
+          },
+        });
+        if (!noteRegion) return { error: "Failed to create NoteRegion" };
+
+        for (const n of item.notes) {
+          t.create("note" as any, {
+            collection: (noteCollection as any).location,
+            positionTicks: n.positionTicks,
+            durationTicks: n.durationTicks,
+            pitch: n.pitch,
+            velocity: n.velocity,
+          });
+        }
+
+        trackResults.push({
+          noteTrackId: (noteTrack as any).id,
+          noteCount: item.notes.length,
+          playerEntityId: resolvedPlayerEntityId,
+        });
+
+        if (item.replaceNoteTrackId) {
+          const oldPlayerId = oldPlayersByTrack.get(item.replaceNoteTrackId) ?? null;
+          t.removeWithDependencies(item.replaceNoteTrackId);
+          if (item.removeOldPlayer && oldPlayerId) {
+            const stillUsed = t.entities
+              .ofTypes("noteTrack" as any)
+              .get()
+              .some((nt: any) => refId(nt.fields?.player) === oldPlayerId);
+            if (!stillUsed) {
+              t.removeWithDependencies(oldPlayerId);
+            }
+          }
+        }
+      }
+
+      return { ok: true, tracks: trackResults };
+    } catch (innerError) {
+      return { error: innerError instanceof Error ? innerError.message : String(innerError) };
+    }
+  });
+
+  if ("error" in result) {
+    throw new Error(result.error as string);
+  }
+
+  return (result as { ok: true; tracks: Array<{ noteTrackId: string; noteCount: number; playerEntityId: string }> }).tracks;
+}
+
+function formatNoteTrackInsertResponse(
+  tracks: Array<{ noteTrackId: string; noteCount: number; playerEntityId: string }>,
+  label: string,
+) {
+  if (tracks.length === 1) {
+    const tr = tracks[0];
+    return {
+      content: [{
+        type: "text" as const,
+        text: `Added ${label} track with ${tr.noteCount} notes. NoteTrack ID: ${tr.noteTrackId}. Player Entity ID: ${tr.playerEntityId}`,
+      }],
+    };
+  }
+
+  const totalNotes = tracks.reduce((s, tr) => s + tr.noteCount, 0);
+  let output = `Added ${tracks.length} ${label} tracks (${totalNotes} notes total):\n`;
+  for (const tr of tracks) {
+    output += `- NoteTrack ID: ${tr.noteTrackId}, ${tr.noteCount} notes, Player: ${tr.playerEntityId}\n`;
+  }
+  return { content: [{ type: "text" as const, text: output }] };
 }
 
 function registerTools(srv: McpServer): void {
@@ -1030,8 +1248,6 @@ srv.registerTool(
         throw new Error("Either 'abcNotation' (single mode) or a 'tracks' array (batch mode) must be provided.");
       }
 
-      const doc = await getDocument();
-
       const prepared: Array<{
         notes: Array<{ positionTicks: number; durationTicks: number; pitch: number; velocity: number }>;
         instrumentType: string;
@@ -1111,178 +1327,192 @@ srv.registerTool(
         }
       }
 
-      const preModifyEntities = doc.queryEntities.get();
-      const oldPlayersByTrack = new Map<string, string | null>();
-      for (const target of replacementTargets) {
-        const oldTrack = preModifyEntities.find((e) => e.id === target.noteTrackId);
-        if (!oldTrack) {
-          throw new Error(`Note track ${target.noteTrackId} not found for replacement.`);
-        }
-        oldPlayersByTrack.set(target.noteTrackId, refId((oldTrack.fields as any).player));
-      }
-
-      const result = await doc.modify((t) => {
-        try {
-          const trackResults: Array<{ noteTrackId: string; noteCount: number; playerEntityId: string }> = [];
-
-          for (const item of prepared) {
-            let playerLocation: { location: { id: string } };
-            let resolvedPlayerEntityId: string;
-
-            if (item.playerEntityId) {
-              const playerEntity = t.entities.getEntity(item.playerEntityId);
-              if (!playerEntity) {
-                return { error: `Player entity ${item.playerEntityId} not found` };
-              }
-              const mismatch = getAbcTrackPlayerMismatchError({
-                playerEntityType: playerEntity.entityType,
-                instrument: item.instrument,
-                orchestralVoice: item.orchestralVoice,
-                abcNotation: item.abcNotation,
-              });
-              if (mismatch) {
-                return { error: mismatch };
-              }
-              playerLocation = playerEntity as any;
-              resolvedPlayerEntityId = item.playerEntityId;
-            } else {
-              const posX = item.x ?? autoLayoutOffset * 120;
-              const posY = item.y ?? 0;
-              autoLayoutOffset++;
-              const displayName = `${item.instrumentType} ${autoLayoutOffset}`;
-
-              // 0.0.15+: if we fetched a GM preset for a gakki device, create the
-              // device directly from the preset so we don't need a second
-              // transaction to apply it. Otherwise fall back to a plain create().
-              let player: any;
-              if (item.instrumentType === "gakki" && item.gakkiPreset !== undefined) {
-                player = (t as any).createDeviceFromPreset(item.gakkiPreset);
-                if (!player) {
-                  return { error: `Failed to create gakki from preset` };
-                }
-                const fields = player.fields as any;
-                if (fields?.positionX) t.update(fields.positionX, posX);
-                if (fields?.positionY) t.update(fields.positionY, posY);
-                if (fields?.displayName) t.update(fields.displayName, displayName);
-              } else {
-                player = t.create(item.instrumentType as any, {
-                  positionX: posX,
-                  positionY: posY,
-                  displayName,
-                });
-                if (!player) {
-                  return { error: `Failed to create ${item.instrumentType} instrument` };
-                }
-              }
-
-              if (item.autoConnectToMixer !== false) {
-                connectDeviceToStagebox(t, player, item.instrumentType);
-              }
-              if (item.instrumentType === "heisenberg") {
-                setHeisenbergOperatorAGain(t, player, 0.5);
-              }
-              playerLocation = player as any;
-              resolvedPlayerEntityId = (player as any).id;
-            }
-
-            const existingTracks = t.entities
-              .ofTypes("noteTrack" as any, "audioTrack" as any, "automationTrack" as any, "patternTrack" as any)
-              .get();
-            const maxTrackOrder = existingTracks.reduce((max: number, tr: any) => {
-              const order = (tr.fields as any).orderAmongTracks?.value ?? 0;
-              return Math.max(max, order);
-            }, -1);
-
-            const noteTrack = t.create("noteTrack" as any, {
-              orderAmongTracks: maxTrackOrder + 1,
-              player: playerLocation.location,
-            });
-            if (!noteTrack) return { error: "Failed to create NoteTrack" };
-
-            const noteCollection = t.create("noteCollection" as any, {});
-            if (!noteCollection) return { error: "Failed to create NoteCollection" };
-
-            const lastNote = item.notes[item.notes.length - 1];
-            const regionEnd = lastNote.positionTicks + lastNote.durationTicks;
-            const regionDuration = Math.max(regionEnd, TICKS_WHOLE);
-
-            const noteRegion = t.create("noteRegion" as any, {
-              track: (noteTrack as any).location,
-              collection: (noteCollection as any).location,
-              region: {
-                positionTicks: 0,
-                durationTicks: regionDuration,
-                loopDurationTicks: regionDuration,
-                collectionOffsetTicks: 0,
-                loopOffsetTicks: 0,
-              },
-            });
-            if (!noteRegion) return { error: "Failed to create NoteRegion" };
-
-            for (const n of item.notes) {
-              t.create("note" as any, {
-                collection: (noteCollection as any).location,
-                positionTicks: n.positionTicks,
-                durationTicks: n.durationTicks,
-                pitch: n.pitch,
-                velocity: n.velocity,
-              });
-            }
-
-            trackResults.push({
-              noteTrackId: (noteTrack as any).id,
-              noteCount: item.notes.length,
-              playerEntityId: resolvedPlayerEntityId,
-            });
-
-            if (item.replaceNoteTrackId) {
-              const oldPlayerId = oldPlayersByTrack.get(item.replaceNoteTrackId) ?? null;
-              t.removeWithDependencies(item.replaceNoteTrackId);
-              if (item.removeOldPlayer && oldPlayerId) {
-                const stillUsed = t.entities
-                  .ofTypes("noteTrack" as any)
-                  .get()
-                  .some((nt: any) => refId(nt.fields?.player) === oldPlayerId);
-                if (!stillUsed) {
-                  t.removeWithDependencies(oldPlayerId);
-                }
-              }
-            }
-          }
-
-          return { ok: true, tracks: trackResults };
-        } catch (innerError) {
-          return { error: innerError instanceof Error ? innerError.message : String(innerError) };
-        }
-      });
-
-      if ("error" in result) {
-        throw new Error(result.error as string);
-      }
-
-      const tracks = (result as { ok: true; tracks: Array<{ noteTrackId: string; noteCount: number; playerEntityId: string }> }).tracks;
-
-      if (tracks.length === 1) {
-        const tr = tracks[0];
-        return {
-          content: [{
-            type: "text",
-            text: `Added ABC track with ${tr.noteCount} notes. NoteTrack ID: ${tr.noteTrackId}. Player Entity ID: ${tr.playerEntityId}`,
-          }],
-        };
-      }
-
-      const totalNotes = tracks.reduce((s, tr) => s + tr.noteCount, 0);
-      let output = `Added ${tracks.length} ABC tracks (${totalNotes} notes total):\n`;
-      for (const tr of tracks) {
-        output += `- NoteTrack ID: ${tr.noteTrackId}, ${tr.noteCount} notes, Player: ${tr.playerEntityId}\n`;
-      }
-      return { content: [{ type: "text", text: output }] };
+      const tracks = await commitPreparedNoteTracks(prepared, replacementTargets);
+      return formatNoteTrackInsertResponse(tracks, "ABC");
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error(`[add-abc-track] ERROR:`, errorMsg);
       return {
         content: [{ type: "text", text: `Failed to add ABC track: ${errorMsg}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// add-strudel-track — evaluate Strudel JS patterns and insert MIDI note tracks
+srv.registerTool(
+  "add-strudel-track",
+  {
+    description: [
+      "Add one or more note tracks from Strudel live-coding JavaScript (https://strudel.cc/).",
+      "Evaluates patterns like note(\"c3 e3 g3\").sound(\"gm_acoustic_bass\") or stack(...) and converts pitched haps to MIDI notes in Audiotool.",
+      "Use mini-notation in double quotes (REPL style). Multi-line REPL code with $: is auto-stacked.",
+      "SINGLE MODE: strudelCode (+ optional cycles, instrument, replaceNoteTrackId, etc.).",
+      "BATCH MODE: tracks array. cycles defaults to 4 (≈ four bars). One Strudel cycle = one bar at the project time signature.",
+      "Prefer .sound('gm_...') or pass instrument for GM instruments; drums via s('bd sd') use gakki GM drum kit (not bare machiniste).",
+      "For simple folk/leadsheet notation without JS patterns, use add-abc-track instead.",
+    ].join(" "),
+    inputSchema: z.object({
+      strudelCode: z
+        .string()
+        .optional()
+        .describe("Strudel JavaScript pattern (single mode). Example: note(\"c2 e2 g2\").sound(\"gm_acoustic_bass\")"),
+      cycles: z
+        .number()
+        .optional()
+        .describe("How many Strudel cycles to render (default 4). One cycle = one bar at project meter."),
+      instrument: z.string().optional().describe("Audiotool device/GM instrument override (single mode). For drums use drumKit or let server pick gakki GM kit."),
+      drumKit: z
+        .string()
+        .optional()
+        .describe("GM drum kit for Strudel s('bd sd') patterns (e.g. standard-kit, electronic-kit, jazz-kit)."),
+      orchestralVoice: z.string().optional().describe("Specific orchestral voice for Gakki presets (single mode)."),
+      playerEntityId: z.string().optional().describe("Existing player entity ID (single mode). Omit when swapping instruments."),
+      replaceNoteTrackId: z.string().optional().describe("Remove this note track after creating the new one (instrument swap)."),
+      removeOldPlayer: z.boolean().optional().default(true),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      autoConnectToMixer: z.boolean().optional().default(true),
+      tracks: z.array(z.object({
+        strudelCode: z.string().describe("Strudel JavaScript pattern"),
+        cycles: z.number().optional(),
+        instrument: z.string().optional(),
+        drumKit: z.string().optional(),
+        orchestralVoice: z.string().optional(),
+        playerEntityId: z.string().optional(),
+        replaceNoteTrackId: z.string().optional(),
+        removeOldPlayer: z.boolean().optional().default(true),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        autoConnectToMixer: z.boolean().optional().default(true),
+      })).optional(),
+    }),
+  },
+  async (args: {
+    strudelCode?: string;
+    cycles?: number;
+    instrument?: string;
+    drumKit?: string;
+    orchestralVoice?: string;
+    playerEntityId?: string;
+    replaceNoteTrackId?: string;
+    removeOldPlayer?: boolean;
+    x?: number;
+    y?: number;
+    autoConnectToMixer?: boolean;
+    tracks?: Array<{
+      strudelCode: string;
+      cycles?: number;
+      instrument?: string;
+      drumKit?: string;
+      orchestralVoice?: string;
+      playerEntityId?: string;
+      replaceNoteTrackId?: string;
+      removeOldPlayer?: boolean;
+      x?: number;
+      y?: number;
+      autoConnectToMixer?: boolean;
+    }>;
+  }) => {
+    try {
+      const trackItems = args.tracks
+        ? args.tracks
+        : [{
+            strudelCode: args.strudelCode!,
+            cycles: args.cycles,
+            instrument: args.instrument,
+            drumKit: args.drumKit,
+            orchestralVoice: args.orchestralVoice,
+            playerEntityId: args.playerEntityId,
+            replaceNoteTrackId: args.replaceNoteTrackId,
+            removeOldPlayer: args.removeOldPlayer,
+            x: args.x,
+            y: args.y,
+            autoConnectToMixer: args.autoConnectToMixer,
+          }];
+
+      if (!trackItems[0]?.strudelCode?.trim()) {
+        throw new Error("Either 'strudelCode' (single mode) or a 'tracks' array (batch mode) must be provided.");
+      }
+
+      const prepared: PreparedNoteTrackPayload[] = [];
+      const replacementTargets: Array<{ noteTrackId: string; removeOldPlayer: boolean }> = [];
+      const timing = await readProjectTimingConfig();
+      const ticksPerCycle = ticksPerBar(timing.timeSignatureNum, timing.timeSignatureDen);
+
+      for (const item of trackItems) {
+        const normalized = normalizeStrudelCode(item.strudelCode);
+        const notes = await parseStrudelToNotes(normalized, {
+          cycles: item.cycles ?? 4,
+          ticksPerCycle,
+        });
+
+        if (item.replaceNoteTrackId && item.playerEntityId) {
+          throw new Error(
+            "Do not pass playerEntityId when replaceNoteTrackId is set — a new instrument will be created.",
+          );
+        }
+
+        const instrumentHint = item.instrument ?? inferInstrumentFromStrudelCode(normalized);
+        const resolved = resolveStrudelTrackInstrument({
+          strudelCode: normalized,
+          instrument: instrumentHint,
+          orchestralVoice: item.orchestralVoice,
+          drumKit: item.drumKit,
+        });
+        const instrumentType = resolved.instrumentType;
+
+        let gakkiPreset: unknown | undefined = undefined;
+        if (!item.playerEntityId && instrumentType === "gakki") {
+          const client = await getClient();
+          if (resolved.drumKitSlug) {
+            gakkiPreset = await client.presets.getDrums(resolved.drumKitSlug);
+            console.error(
+              `[add-strudel-track] loaded gakki drum kit=${resolved.drumKitSlug}`,
+            );
+          } else {
+            const slug = resolveGmInstrumentSlugFromHints({
+              instrument: instrumentHint,
+              orchestralVoice: item.orchestralVoice,
+              abcNotation: normalized,
+            });
+            if (slug) {
+              gakkiPreset = await client.presets.getInstrument(slug);
+            }
+          }
+        }
+
+        prepared.push({
+          notes,
+          instrumentType,
+          gakkiPreset,
+          instrument: resolved.instrumentLabel,
+          orchestralVoice: item.orchestralVoice,
+          abcNotation: normalized,
+          playerEntityId: item.playerEntityId,
+          replaceNoteTrackId: item.replaceNoteTrackId,
+          removeOldPlayer: item.removeOldPlayer !== false,
+          x: item.x,
+          y: item.y,
+          autoConnectToMixer: item.autoConnectToMixer,
+        });
+
+        if (item.replaceNoteTrackId) {
+          replacementTargets.push({
+            noteTrackId: item.replaceNoteTrackId,
+            removeOldPlayer: item.removeOldPlayer !== false,
+          });
+        }
+      }
+
+      const tracks = await commitPreparedNoteTracks(prepared, replacementTargets);
+      return formatNoteTrackInsertResponse(tracks, "Strudel");
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[add-strudel-track] ERROR:`, errorMsg);
+      return {
+        content: [{ type: "text", text: `Failed to add Strudel track: ${errorMsg}` }],
         isError: true,
       };
     }

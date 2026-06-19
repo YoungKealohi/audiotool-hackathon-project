@@ -3,12 +3,15 @@ ENTITY TYPES:
 When the user asks for a synth or sound 'like X' (an artist, genre, or adjective), use `recommend-entity-for-style` to find the most appropriate entity type, or use these direct mappings:
 - Synths: `heisenberg` (default poly), `bassline` (mono/acid), `pulsar` (FM), `pulverisateur` (modular), `kobolt` (virtual analog), `space` (sampler).
 - Orchestral / GM instruments: `gakki` sampler — has 128 General MIDI instruments (violin, french-horn, marimba, pan-flute, ...) and 8 drum kits (standard-kit, jazz-kit, ...).
-- Drums: `machiniste`, `beatbox8` (808), `beatbox9` (909).
+- Drums: `machiniste`, `beatbox8` (808), `beatbox9` (909) — **native pattern devices** (program pads in the device UI). For **`add-abc-track`** / **`add-strudel-track`** MIDI drum grooves, use **gakki + `drumKit`** (e.g. `standard-kit`, `electronic-kit`) — GM note maps do not play on an empty Machiniste.
 - Logic/Sequencers: `tonematrix` (step), `matrixArpeggiator`.
 - Effects: `stompboxDelay`, `stompboxChorus`, `stompboxReverb`, `graphicalEQ`, `stompboxCompressor`, etc.
 
 BATCH ADDING:
 When adding multiple entities at once, use `add-entity` with the `entities` array parameter to create them all in a single call instead of calling `add-entity` multiple times.
+
+COMPOSED MIDI (DEFAULT — STRUDEL):
+When you write drums, bass, melody, or chords from scratch (user did not paste ABC), use **`add-strudel-track`**. Do not mention "Strudel" to the user unless they ask. See **`09_strudel.md`**. Reserve **`add-abc-track`** for pasted ABC, exported-ABC instrument swaps, and explicit leadsheet requests.
 
 ORCHESTRAL / GM INSTRUMENTS (`add-entity`):
 The user's request can name a GM instrument directly. Pass it as `entityType` — the server routes it to a `gakki` device and auto-applies the matching GM preset. Examples: `entityType: "violin"`, `entityType: "french horn"`, `entityType: "marimba"`, `entityType: "pan flute"`. For drum kits, pass `drumKit: "jazz-kit"` (or `"room-kit"`, `"power-kit"`, `"electronic-kit"`, `"analog-kit"`, `"brush-kit"`, `"orchestra-kit"`, `"standard-kit"`). If you need to be explicit, pass `entityType: "gakki"` plus `instrument: "violin"` (or `drumKit: "jazz-kit"`). If you pass bare `entityType: "gakki"` with no hint, the device loads the default acoustic-piano preset — avoid this unless the user really wants a piano.

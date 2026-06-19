@@ -100,22 +100,21 @@ def load_system_instruction() -> str:
         "that entity. Never paste raw ids into the user-facing reply.\n\n"
 
         "# Melody / MIDI vs audio generation (IMPORTANT)\n"
-        "- When the user asks you to 'generate a melody', 'write a bassline', 'write a riff', "
-        "'create notes', 'make a chord progression', or otherwise asks for played notes on a "
-        "synthesizer or instrument, default to the ABC notation / MIDI track tool. Produce valid "
-        "ABC and insert it as a note track.\n"
-        "- Before generating a melody/bassline/chord progression yourself via the ABC "
-        "notation tool (i.e. when the melody subagent was not invoked), you MUST "
-        "first call the project-inspection tool to fetch the current tempo and, if "
-        "possible, the key/chord context. Use those values in the ABC so it lines "
-        "up with the user's project. If the inspection fails, pick sensible defaults "
-        "and briefly note them in your reply.\n"
+        "- When the user asks you to 'generate a melody', 'write a bassline', 'add drums', "
+        "'create a groove', 'write a riff', 'make a chord progression', or otherwise asks "
+        "for played notes on a synthesizer or instrument, insert a note track.\n"
+        "- **Default to Strudel JavaScript** (`add-strudel-track`) for any part you compose "
+        "from scratch — drums, bass, melody, chords, grooves. Do not mention \"Strudel\" "
+        "to the user unless they asked for it by name. See 09_strudel.md.\n"
+        "- Use **ABC** (`add-abc-track`) only when the user pasted ABC notation, asked for "
+        "leadsheet/staff notation, or you are swapping instruments on exported ABC notes.\n"
+        "- Before generating notes yourself (when the melody subagent was not invoked), call "
+        "get-project-summary for tempo/meter, and update-project-config if the user specified "
+        "values that differ from the project.\n"
         "- Only use the ElevenLabs audio-generation tool when the user explicitly asks for an "
         "audio sample, an audio loop, a bed/beat, vocals, or a rendered audio clip. Phrases like "
         "'make me a 15s lo-fi sample', 'render vocals', or 'generate audio of ...' belong here. "
         "When the user wants vocals or specific lyrics performed, pass force_instrumental=false.\n"
-        "- If the user is ambiguous and the project already has instruments loaded, prefer ABC "
-        "(it slots into their existing tracks).\n"
         "- When the user asks to change or replace the instrument on existing notes (e.g. bassline "
         "synth to electric bass guitar), export the notes, call add-abc-track with the new "
         "instrument and replaceNoteTrackId, and do NOT reuse the old playerEntityId.\n"
@@ -158,9 +157,9 @@ def load_system_instruction() -> str:
         "result summary is usually enough.\n\n"
 
         "# Routing marker (internal)\n"
-        "If the user's request is clearly about generating played notes (melody/bassline/riff/"
-        "chord progression) but you have not been routed to the melody subagent, silently "
-        "proceed with the ABC notation tool yourself. Do not mention this marker to the user.\n\n"
+        "If the user's request is clearly about generating played notes (melody/bassline/drums/"
+        "groove/chord progression) but you have not been routed to the melody subagent, silently "
+        "proceed with add-strudel-track yourself. Do not mention this marker to the user.\n\n"
     )
     
     skills_dir = os.path.join(os.path.dirname(__file__), "skills")
@@ -539,8 +538,8 @@ class MCPClient:
                 name=GENERATE_MUSIC_TOOL_NAME,
                 description=(
                     "Generate original music audio from a text prompt using ElevenLabs. "
-                    "Use when the user asks for AI-generated music, beds, beats, or jingles—not for ABC notation "
-                    "(use add-abc-track for ABC). "
+                    "Use when the user asks for AI-generated music, beds, beats, or jingles—not for "
+                    "MIDI note tracks (use add-strudel-track; add-abc-track only for pasted ABC). "
                     "Use force_instrumental=false for sung vocals or user-specified lyrics. "
                     "Nexus adds the clip to the Audiotool timeline only when a project is connected in the sidebar."
                 ),
@@ -576,7 +575,7 @@ class MCPClient:
             "name": GENERATE_MUSIC_TOOL_NAME,
             "description": (
                 "Generate original music audio from a text prompt (ElevenLabs). "
-                "For AI-generated music requests—not ABC notation (add-abc-track). "
+                "For AI-generated music requests—not MIDI note tracks (add-strudel-track by default). "
                 "force_instrumental=false for vocals/lyrics; timeline import requires a connected Audiotool project in Nexus."
             ),
             "input_schema": convert_mcp_schema_to_anthropic(GENERATE_MUSIC_SCHEMA),
@@ -614,7 +613,7 @@ class MCPClient:
                 "name": GENERATE_MUSIC_TOOL_NAME,
                 "description": (
                     "Generate original music audio from a text prompt (ElevenLabs). "
-                    "Not for ABC notation. force_instrumental=false for vocals/lyrics; "
+                    "Not for MIDI note tracks (use add-strudel-track). force_instrumental=false for vocals/lyrics; "
                     "timeline import needs a connected Audiotool project in Nexus."
                 ),
                 "parameters": convert_mcp_schema_to_openai(GENERATE_MUSIC_SCHEMA),
@@ -998,7 +997,10 @@ class MCPClient:
             + ", ".join(parts) + ". "
             "If the user asks to change the tempo or time signature, you MUST call the "
             "project-configuration tool with the new values. Do not claim the change was made "
-            "without calling the tool. When the user wants something that fits their project, "
+            "without calling the tool. When composing drums, bass, melody, or chords, match "
+            "the project tempo and meter (or update them first if the user specified new values). "
+            "Strudel patterns use one cycle per bar — BPM lives in the project config, not in "
+            "setcpm/setcps. When the user wants something that fits their project, "
             "use the project-summary and ABC-export tools to gather deeper context (key, chord "
             "progression, note ranges) before generating. If the user just asks for a general "
             "sample without mentioning matching the project, ignore this context and use only "

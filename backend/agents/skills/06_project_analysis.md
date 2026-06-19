@@ -44,7 +44,7 @@ When the user asks what to change, for feedback, or "how can I improve this?":
 4. Reply with **observations first**, then **1–3 prioritized suggestions** actionable in Audiotool (`add-abc-track`, `update-project-config`, preset/layer changes).
 5. Offer to implement the top suggestion; do not rewrite their whole song unprompted.
 
-If they have no note content yet, suggest a starting progression (`Progression.fromRomanNumerals`) or motif matched to genre — then implement with `add-abc-track` if they want.
+If they have no note content yet, suggest a starting progression (`Progression.fromRomanNumerals`) or motif matched to genre — then implement with `add-strudel-track` if they want.
 
 ## Analyzing ABC from export-tracks-abc
 

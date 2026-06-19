@@ -604,7 +604,7 @@ topNoteDiff(
 1. **Inspect** — `get-project-summary` + `export-tracks-abc`.
 2. **Analyze** — extract pitch classes from ABC → `Chord.detect`, `Scale.get`, `Progression.toRomanNumerals`, compare to `Key.majorKey` / `Key.minorKey`.
 3. **Plan** — choose diatonic or borrowed chords (`Progression.fromRomanNumerals`, `Mode`, secondary dominants from `Key`).
-4. **Generate** — write ABC with correct `K:` key and spellings (`AbcNotation` rules); `add-abc-track` with appropriate `instrument`.
+4. **Generate** — write Strudel patterns (default) or ABC when appropriate; `add-strudel-track` with `.sound('gm_...')` / `s('bd sd')` or `add-abc-track` for pasted ABC.
 5. **Explain** — tell the user in musical language (chord symbols, roman numerals, scale names). Do not cite `tonal` or package names unless asked.
 
 When `00_music_theory.md` gives genre and arrangement advice, use this skill for spelling, detection, and progression math.

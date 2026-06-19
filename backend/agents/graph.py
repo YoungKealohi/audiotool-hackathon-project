@@ -13,7 +13,9 @@ LangGraph StateGraph so that:
 
 from __future__ import annotations
 
+import os
 import re
+import json
 import uuid
 from typing import Any, Dict, Optional, Sequence, TypedDict
 
@@ -71,10 +73,17 @@ MELODY_PATTERNS = re.compile(
     r"\b("
     r"melody|melodies|bass[\s-]?line|riff|lead line|"
     r"chord progression|chord changes|"
-    r"write (?:some )?(?:notes|notes for|a part|a line|a hook)|"
-    r"generate (?:a |some )?(?:melody|notes|midi|bassline|chords?)|"
+    r"drums?|drum[\s-]?(?:beat|pattern|groove|track|part|line)|"
+    r"percussion|groove|rhythm(?: section)?|beat(?: pattern)?|"
+    r"hi[\s-]?hats?|four-on-the-floor|backbeat|"
+    r"write (?:some )?(?:notes|notes for|a part|a line|a hook|a track|a groove|drums?)|"
+    r"add (?:a |some )?(?:melody|bassline|drums?|groove|part|track|layer|riff|chords?)|"
+    r"create (?:a |some )?(?:melody|bassline|drums?|groove|part|track|beat|riff|chords?)|"
+    r"generate (?:a |some )?(?:melody|notes|midi|bassline|chords?|drums?|groove|beat|part|track)|"
+    r"compose|arrange (?:a |the )?(?:part|track|groove|beat)|"
+    r"strudel|tidal|mini-notation|live cod(?:e|ing)|"
     r"midi (?:part|pattern|sequence)|abc notation"
-    r")\b",
+    r")\b|X:\s*\d",
     re.IGNORECASE,
 )
 
@@ -89,8 +98,15 @@ AUDIO_INTENT_PATTERNS = re.compile(
 
 MELODY_SUBAGENT_SYSTEM = (
     "# Role\n"
-    "You are the Nexus Melody/MIDI subagent. Your single job is to generate and insert a "
-    "musically strong MIDI part expressed as ABC notation.\n\n"
+    "You are the Nexus Melody/MIDI subagent. Generate and insert musically strong MIDI parts "
+    "using **Strudel JavaScript** by default (see Strudel skill below). Never mention "
+    "\"Strudel\" to the user unless they asked for it by name.\n\n"
+
+    "# Format choice\n"
+    "- **Default: Strudel** — use for drums, bass, melody, chords, grooves, syncopation, "
+    "stack/$: layers, euclidean patterns, and any part you compose from scratch.\n"
+    "- **ABC only when** the user pasted ABC (`X:1` …), asked for leadsheet/staff notation, "
+    "or you are re-inserting notes exported from `export-tracks-abc` (instrument swap).\n\n"
 
     "# Musicianship principles\n"
     "- Do not default to plain C major or stepwise eighth notes. Choose a mode/scale that "
@@ -104,24 +120,35 @@ MELODY_SUBAGENT_SYSTEM = (
     "- For melodies: define a clear motif in the first 2 bars and develop it (sequence, "
     "inversion, rhythmic displacement) across the remaining bars.\n"
     "- For chord progressions: prefer functional harmony with at least one non-tonic "
-    "resolution (ii-V-I, I-vi-IV-V, or modal equivalents).\n\n"
+    "resolution (ii-V-I, I-vi-IV-V, or modal equivalents).\n"
+    "- For drums: use `s(\"bd sd hh\")` patterns; server loads **gakki + GM drum kit** — "
+    "do not target bare machiniste.\n\n"
+
+    "# Tempo and meter (CRITICAL)\n"
+    "- **BPM and time signature are project settings** — call `update-project-config` when the "
+    "user specifies them (e.g. 120 BPM, 6/8, 3/4). Do this **before** `add-strudel-track`.\n"
+    "- Call `get-project-summary` first if you do not already know the current tempo and meter.\n"
+    "- Do **not** use `setcpm` / `setcps` in Strudel — export ignores them; timing comes from "
+    "the project config + tick placement.\n"
+    "- One Strudel **cycle** = one bar at the project meter. Default **4 cycles** = four bars.\n\n"
 
     "# Output contract\n"
-    "- Write valid ABC with each header field on its own line (X:, T:, M:, L:, Q:, K:, then "
-    "the tune body).\n"
-    "- Keep the piece to 4-16 bars unless the user asks for more.\n"
-    "- Then call the ABC-notation track-insertion tool exactly once with that ABC and the "
-    "appropriate instrument/voice so the notes land in the project.\n"
-    "- After the tool returns, reply with ONE short sentence describing what you wrote "
-    "(genre, mode, bar count). Do not include raw ABC or tool names in your reply.\n\n"
+    "- Strudel: valid JS (double-quoted mini-notation), 4 cycles default, "
+    "`.sound('gm_...')` for pitched GM instruments; call **add-strudel-track** once per layer.\n"
+    "- ABC (rare): headers on separate lines (X:, T:, M:, L:, Q:, K:); call add-abc-track once.\n"
+    "- Keep parts to 4-16 bars unless the user asks for more.\n"
+    "- Reply with ONE short sentence (genre, mode, bar/cycle count). No raw code or tool names.\n\n"
 
     "# Context\n"
-    "{context_block}\n"
+    "{context_block}\n\n"
+
+    "# Strudel skill\n"
+    "{strudel_skill}\n"
 )
 
 
 _MISSING_CONTEXT_BLOCK = (
-    "No DAW context was provided by the frontend. Before writing any ABC, "
+    "No DAW context was provided by the frontend. Before writing any Strudel or ABC, "
     "call the project-summary tool to fetch the current tempo and, if available, "
     "existing instruments/key. If that still does not give you a key, pick one "
     "that matches the user's stated genre or mood, and explain the choice in your "
@@ -129,13 +156,23 @@ _MISSING_CONTEXT_BLOCK = (
 )
 
 
-def _build_melody_context_block(daw_context: Optional[Dict[str, Any]]) -> str:
-    """Build the Context block for the melody subagent system prompt.
+def _load_melody_skill(filename: str) -> str:
+    """Load a single skill markdown file for the melody subagent."""
+    path = os.path.join(os.path.dirname(__file__), "skills", filename)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError as exc:
+        print(f"[graph] Failed to load melody skill {filename}: {exc}")
+        return ""
 
-    If DAW context is missing, instructs the subagent to fetch it via the
-    project-summary tool before generating any notes. Otherwise, surfaces
-    tempo/meter/instruments so the generated ABC lines up.
-    """
+
+def _build_melody_context_block(daw_context: Optional[Dict[str, Any]]) -> str:
+    """Build the Context block for the melody subagent system prompt."""
+    timing_tail = (
+        " If the user asked for a different tempo or meter than listed here, call "
+        "update-project-config first, then add-strudel-track."
+    )
     if not daw_context:
         return _MISSING_CONTEXT_BLOCK
     parts = []
@@ -150,12 +187,50 @@ def _build_melody_context_block(daw_context: Optional[Dict[str, Any]]) -> str:
     return (
         "You are writing MIDI for a project with the following settings: "
         + "; ".join(parts) + ". "
-        "Your ABC notation MUST align with this tempo and meter. If the user has not "
+        "Your Strudel patterns MUST align with this tempo and meter. If the user has not "
         "specified a key, pick one that complements the existing instruments."
+        + timing_tail
     )
 
 
-MELODY_TOOL_ALLOWLIST = {"add-abc-track", "export-tracks-abc", "get-project-summary"}
+async def _fetch_project_timing(client: MCPClient) -> Dict[str, Any]:
+    """Read tempo and meter from get-project-summary (authoritative over stale hints)."""
+    if client.session is None:
+        return {}
+    try:
+        result = await client.session.call_tool("get-project-summary", {})
+        text = MCPClient._extract_tool_result(result)
+        data = json.loads(text)
+        config = data.get("config") or {}
+        out: Dict[str, Any] = {}
+        if config.get("tempoBpm") is not None:
+            out["tempoBpm"] = config["tempoBpm"]
+        if config.get("timeSignature"):
+            out["timeSignature"] = config["timeSignature"]
+        return out
+    except Exception as exc:
+        print(f"[graph] get-project-summary for melody failed: {exc}")
+        return {}
+
+
+def _merge_daw_context(
+    daw_context: Optional[Dict[str, Any]],
+    fetched: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    merged = dict(daw_context or {})
+    for key, value in fetched.items():
+        if value is not None:
+            merged[key] = value
+    return merged or None
+
+
+MELODY_TOOL_ALLOWLIST = {
+    "add-abc-track",
+    "add-strudel-track",
+    "export-tracks-abc",
+    "get-project-summary",
+    "update-project-config",
+}
 
 
 async def add_user_turn(state: AgentState) -> dict:
@@ -224,25 +299,36 @@ async def apply_project_config_precall(state: AgentState) -> dict:
 
 
 async def generate_midi_melody(state: AgentState) -> dict:
-    """Scoped subagent that writes musically-opinionated ABC and inserts it.
+    """Scoped subagent that writes musically-opinionated Strudel and inserts MIDI.
 
     Runs a fresh LLM tool-calling loop with a music-theory-focused system prompt
-    and a restricted tool allowlist (ABC insertion + project inspection only).
+    and a restricted tool allowlist (Strudel/ABC insertion + project inspection only).
     The resulting summary is stored in ``melody_subagent_result`` so the main
     agent can compose the user-facing reply on hand-back.
     """
     client: MCPClient = state["mcp_client"]
-    daw_context = state.get("daw_context")
     stream_callback = state.get("stream_callback")
     query = state.get("current_query", "")
+    project_config_precall = state.get("project_config_precall")
+
+    fetched_timing = await _fetch_project_timing(client)
+    daw_context = _merge_daw_context(state.get("daw_context"), fetched_timing)
+
+    user_message = query
+    if project_config_precall:
+        user_message = (
+            f"{query}\n\n[System: project config was already updated this turn — "
+            f"{project_config_precall}. Use the current project tempo/meter when composing.]"
+        )
 
     system_prompt = MELODY_SUBAGENT_SYSTEM.format(
-        context_block=_build_melody_context_block(daw_context)
+        context_block=_build_melody_context_block(daw_context),
+        strudel_skill=_load_melody_skill("09_strudel.md"),
     )
 
     try:
         summary = await client.run_scoped_tool_loop(
-            user_message=query,
+            user_message=user_message,
             system_instruction=system_prompt,
             tool_allowlist=MELODY_TOOL_ALLOWLIST,
             stream_callback=stream_callback,

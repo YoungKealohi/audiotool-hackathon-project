@@ -46,3 +46,19 @@ def test_parse_meter_alias():
         "timeSignatureNumerator": 6,
         "timeSignatureDenominator": 8,
     }
+
+
+def test_parse_time_signature_in_phrase():
+    r = parse_update_project_config_args("write a groove in 6/8 at 120 bpm")
+    assert r == {
+        "tempoBpm": 120,
+        "timeSignatureNumerator": 6,
+        "timeSignatureDenominator": 8,
+    }
+
+
+def test_parse_six_eight_time_wording():
+    assert parse_update_project_config_args("3/4 time") == {
+        "timeSignatureNumerator": 3,
+        "timeSignatureDenominator": 4,
+    }

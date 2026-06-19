@@ -69,7 +69,8 @@ The backend loads markdown **skills** from `backend/agents/skills/` into the sys
 - **DAW workflows** — adding sounds, editing arrangements, mixing, mastering, project analysis
 - **Music theory & suggestions** — `00_music_theory.md` for creative feedback and genre-aware advice
 - **Tonal.js reasoning** — `08_tonaljs.md` for chord/scale/progression analysis (applied conceptually to exported ABC; not executed in code)
-- **MCP tools** — read/write the live project (`get-project-summary`, `export-tracks-abc`, `add-abc-track`, presets, cables, etc.)
+- **Strudel (default for composed MIDI)** — `09_strudel.md`; agent uses `add-strudel-track` automatically for drums, bass, melody, and chords unless the user pasted ABC
+- **MCP tools** — read/write the live project (`get-project-summary`, `export-tracks-abc`, `add-abc-track`, `add-strudel-track`, presets, cables, etc.)
 
 Upstream Tonal.js docs are mirrored under `backend/agents/skills/references/` for maintainers; only the skill files are loaded into the agent prompt.
 

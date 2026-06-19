@@ -64,28 +64,45 @@ async def test_run_agent_graph_no_intent_resolution():
     )
 
 @pytest.mark.asyncio
-async def test_run_agent_graph_with_intent_resolution():
+async def test_run_agent_graph_style_only_still_resolves_intent():
+    """Pure style/vibe queries still use the synth recommender."""
     mock_client = AsyncMock(spec=MCPClient)
-    # Mock intent resolution call
     mock_session = AsyncMock()
     mock_client.session = mock_session
     mock_session.call_tool.return_value = "Mocked Result: Use machiniste"
-    mock_client._extract_tool_result = lambda x: x # pass through fake result string
-
+    mock_client._extract_tool_result = lambda x: x
     mock_client.run_llm_tool_loop.return_value = ("Created machiniste", None)
 
-    reply, music = await run_agent_graph(mock_client, query="make a drum beat in the style of Daft Punk", history=[])
+    reply, music = await run_agent_graph(
+        mock_client,
+        query="inspired by Daft Punk",
+        history=[],
+    )
 
     assert reply == "Created machiniste"
-    mock_session.call_tool.assert_called_once_with("recommend-entity-for-style", {"description": "make a drum beat in the style of Daft Punk"})
-    mock_client.run_llm_tool_loop.assert_called_once_with(
-        [{"role": "user", "content": "make a drum beat in the style of Daft Punk"}],
-        resolved_intent_hint="Mocked Result: Use machiniste",
-        daw_context=None,
-        stream_callback=None,
-        project_config_precall=None,
-        melody_subagent_result=None,
+    mock_session.call_tool.assert_called_once_with(
+        "recommend-entity-for-style",
+        {"description": "inspired by Daft Punk"},
     )
+    mock_client.run_scoped_tool_loop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_agent_graph_drum_beat_uses_melody_subagent():
+    """Drum/groove composition routes to melody subagent even when style is mentioned."""
+    mock_client = AsyncMock(spec=MCPClient)
+    mock_client.run_scoped_tool_loop.return_value = "Wrote a four-on-the-floor drum groove."
+    mock_client.run_llm_tool_loop.return_value = ("Added drums.", None)
+
+    reply, music = await run_agent_graph(
+        mock_client,
+        query="make a drum beat in the style of Daft Punk",
+        history=[],
+    )
+
+    assert reply == "Added drums."
+    mock_client.run_scoped_tool_loop.assert_called_once()
+    mock_client.session.call_tool.assert_not_called()
 
 
 # ==================== ADDITIONAL AGENT TESTS ====================
@@ -176,6 +193,14 @@ def test_route_after_precall_precedence():
     )
     assert (
         route_after_precall({"current_query": "write a funky bassline in abc notation"})
+        == "generate_midi_melody"
+    )
+    assert (
+        route_after_precall({"current_query": "make a drum beat in the style of Daft Punk"})
+        == "generate_midi_melody"
+    )
+    assert (
+        route_after_precall({"current_query": "add drums for a D minor groove"})
         == "generate_midi_melody"
     )
     assert (

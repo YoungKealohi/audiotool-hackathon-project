@@ -58,6 +58,8 @@ def parse_update_project_config_args(query: str) -> Optional[Dict[str, Any]]:
         r"(?i)(?:time\s*)?signature\s+(?:of|as)\s+(\d+)\s*/\s*(\d+)",
         r"(?i)\bmeter\s*(?:to|at|is|=|:)?\s*(\d+)\s*/\s*(\d+)",
         r"(?i)(?:change|set|put)\s+(?:the\s+)?(?:time\s*)?signature\s+(?:to|at|as)\s+(\d+)\s*/\s*(\d+)",
+        r"(?i)\bin\s+(\d+)\s*/\s*(\d+)\b",
+        r"(?i)(\d+)\s*/\s*(\d+)\s*(?:time|meter)\b",
     ]
     for pat in sig_patterns:
         m = re.search(pat, text)

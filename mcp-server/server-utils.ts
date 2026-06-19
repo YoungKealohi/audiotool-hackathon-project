@@ -243,6 +243,14 @@ export const INSTRUMENT_ALIASES: Record<string, string> = {
 export const TICKS_WHOLE = 15360;
 export const TICKS_QUARTER = 3840;
 
+/** Tick length of one bar for the given time signature (default 4/4 → TICKS_WHOLE). */
+export function ticksPerBar(timeSignatureNum = 4, timeSignatureDen = 4): number {
+  if (timeSignatureNum <= 0 || timeSignatureDen <= 0) {
+    return TICKS_WHOLE;
+  }
+  return (TICKS_WHOLE * timeSignatureNum) / timeSignatureDen;
+}
+
 /**
  * LLMs often flatten ABC headers onto one line with spaces (e.g. `X:1 T:Title M:4/4`)
  * instead of newline-separated lines. abcjs may then yield no notes.
@@ -388,6 +396,76 @@ export function resolveInstrumentTypeForAbcTrack(args: {
   if (resolveGmInstrumentSlugFromHints(args)) return "gakki";
   if (!raw) return "heisenberg";
   return resolveInstrumentType(raw) ?? "heisenberg";
+}
+
+/** True when Strudel code is sample/drum driven (s("bd sd"), stack of s(), etc.). */
+export function detectStrudelDrumPattern(strudelCode: string): boolean {
+  const code = strudelCode.toLowerCase();
+  if (/\bs\s*\(\s*["'][^"']*\b(bd|sd|hh|cp|oh|rim|kick|snare|hat)\b/.test(code)) {
+    return true;
+  }
+  if (/\bstack\s*\([^)]*\bs\s*\(/.test(code)) {
+    return true;
+  }
+  // s(...) only — no pitched note()/n() melody
+  if (/\bs\s*\(/.test(code) && !/\bnote\s*\(/.test(code) && !/\bn\s*\(\s*["']/.test(code)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Resolve player for Strudel note tracks. Drum patterns from timeline MIDI need a
+ * gakki GM drum-kit preset — bare machiniste has no samples and ignores GM note maps.
+ */
+export function resolveStrudelTrackInstrument(args: {
+  strudelCode: string;
+  instrument?: string;
+  orchestralVoice?: string;
+  drumKit?: string;
+}): { instrumentType: string; drumKitSlug?: GmDrumSlug; instrumentLabel: string } {
+  const drumPattern = detectStrudelDrumPattern(args.strudelCode);
+  const raw = args.instrument?.trim().toLowerCase() ?? "";
+  const drumAlias =
+    raw === "machiniste"
+    || raw === "drums"
+    || raw === "drum machine"
+    || raw === "drummachine"
+    || raw === "beatbox8"
+    || raw === "beatbox9";
+
+  if (drumPattern || drumAlias) {
+    const explicitKit = args.drumKit ? resolveGmDrumSlug(args.drumKit) : undefined;
+    const fromInstrument = raw ? resolveGmDrumSlug(raw) : undefined;
+    let drumKitSlug: GmDrumSlug =
+      explicitKit
+      ?? fromInstrument
+      ?? "standard-kit";
+    if (!explicitKit && !fromInstrument) {
+      if (/\b(house|techno|electronic|edm|four-on-the-floor)\b/i.test(args.strudelCode)) {
+        drumKitSlug = "electronic-kit";
+      } else if (/\b(jazz|funk|brush)\b/i.test(args.strudelCode)) {
+        drumKitSlug = "jazz-kit";
+      }
+    }
+    return {
+      instrumentType: "gakki",
+      drumKitSlug,
+      instrumentLabel: args.instrument?.trim() || `gakki (${drumKitSlug})`,
+    };
+  }
+
+  const instrumentHint = args.instrument ?? args.orchestralVoice;
+  const instrumentType = resolveInstrumentTypeForAbcTrack({
+    instrument: instrumentHint,
+    orchestralVoice: args.orchestralVoice,
+    abcNotation: args.strudelCode,
+  });
+  return {
+    instrumentType,
+    drumKitSlug: undefined,
+    instrumentLabel: instrumentHint?.trim() || instrumentType,
+  };
 }
 
 /**

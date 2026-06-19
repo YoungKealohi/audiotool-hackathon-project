@@ -12,6 +12,8 @@ import {
   getAbcTrackPlayerMismatchError,
   resolveGmInstrumentSlug,
   resolveGmInstrumentSlugFromHints,
+  resolveStrudelTrackInstrument,
+  detectStrudelDrumPattern,
   resolveGmDrumSlug,
   isGmInstrumentSlug,
   isGmDrumSlug,
@@ -30,6 +32,7 @@ import {
   AUDIO_OUTPUT_FIELD,
   TICKS_WHOLE,
   TICKS_QUARTER,
+  ticksPerBar,
   GM_INSTRUMENT_SLUGS,
   GM_INSTRUMENT_SLUG_SYNONYMS,
   GM_DRUM_SLUGS,
@@ -451,6 +454,12 @@ describe('Tick Constants', () => {
   it('should have TICKS_WHOLE = 4 * TICKS_QUARTER', () => {
     expect(TICKS_WHOLE).toBe(TICKS_QUARTER * 4);
   });
+
+  it('ticksPerBar scales bar length by time signature', () => {
+    expect(ticksPerBar(4, 4)).toBe(TICKS_WHOLE);
+    expect(ticksPerBar(3, 4)).toBe(TICKS_WHOLE * 0.75);
+    expect(ticksPerBar(6, 8)).toBe(TICKS_WHOLE * 0.75);
+  });
 });
 
 // ==================== AUDIO OUTPUT FIELD TESTS ====================
@@ -801,6 +810,64 @@ describe('notesToAbc', () => {
       expect(parsed[i].positionTicks).toBe(original[i].positionTicks);
       expect(parsed[i].durationTicks).toBe(original[i].durationTicks);
     }
+  });
+});
+
+// ==================== STRUDEL DRUM ROUTING TESTS ====================
+
+describe('detectStrudelDrumPattern', () => {
+  it('detects s("bd sd hh") drum patterns', () => {
+    expect(detectStrudelDrumPattern('s("bd*4, ~ sd, hh*8")')).toBe(true);
+  });
+
+  it('detects stack of drum layers', () => {
+    expect(detectStrudelDrumPattern('stack(s("bd*4"), s("~ sd"))')).toBe(true);
+  });
+
+  it('does not treat pitched note() as drums', () => {
+    expect(detectStrudelDrumPattern('note("c3 e3 g3").sound("gm_piano")')).toBe(false);
+  });
+});
+
+describe('resolveStrudelTrackInstrument', () => {
+  it('routes drum patterns to gakki with standard kit', () => {
+    const resolved = resolveStrudelTrackInstrument({
+      strudelCode: 's("bd*4, ~ sd, hh*8")',
+    });
+    expect(resolved.instrumentType).toBe('gakki');
+    expect(resolved.drumKitSlug).toBe('standard-kit');
+  });
+
+  it('redirects machiniste hint to gakki drum kit', () => {
+    const resolved = resolveStrudelTrackInstrument({
+      strudelCode: 's("bd*4, ~ sd, hh*8")',
+      instrument: 'machiniste',
+    });
+    expect(resolved.instrumentType).toBe('gakki');
+    expect(resolved.drumKitSlug).toBe('standard-kit');
+  });
+
+  it('uses electronic-kit for four-on-the-floor patterns', () => {
+    const resolved = resolveStrudelTrackInstrument({
+      strudelCode: 's("bd*4, ~ sd") // four-on-the-floor house groove',
+    });
+    expect(resolved.drumKitSlug).toBe('electronic-kit');
+  });
+
+  it('respects explicit drumKit override', () => {
+    const resolved = resolveStrudelTrackInstrument({
+      strudelCode: 's("bd sd")',
+      drumKit: 'jazz-kit',
+    });
+    expect(resolved.drumKitSlug).toBe('jazz-kit');
+  });
+
+  it('keeps pitched melodies on synth default without hints', () => {
+    const resolved = resolveStrudelTrackInstrument({
+      strudelCode: 'note("c3 e3 g3").sound("gm_piano")',
+    });
+    expect(resolved.instrumentType).toBe('heisenberg');
+    expect(resolved.drumKitSlug).toBeUndefined();
   });
 });
 
