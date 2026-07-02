@@ -137,6 +137,14 @@ def load_system_instruction() -> str:
         "for genre and arrangement advice, then give specific prioritized suggestions. Use "
         "tools to implement changes; do not lecture or rewrite everything unprompted.\n\n"
 
+        "# Artist / theme references (\"sounds like\", \"in the spirit of\")\n"
+        "- When the user names an artist, song, or film theme and wants the project to match, "
+        "follow **10_reference_styles.md**. Decompose into tempo, key, feel, and layers; compose "
+        "**in the spirit of** — never note-for-note copyrighted melodies.\n"
+        "- Requests like \"make it sound like the Iron Man theme\" route to the melody subagent "
+        "automatically; if you handle them in the main loop, use get-project-summary, "
+        "export-tracks-abc, update-project-config, and add-strudel-track.\n\n"
+
         "# Mastering / mixing safety\n"
         "Before rewiring for mastering, first inspect the project and identify every audible "
         "source (note-track players AND audio-track players, including audioDevice entities from "

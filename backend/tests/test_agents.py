@@ -88,6 +88,34 @@ async def test_run_agent_graph_style_only_still_resolves_intent():
 
 
 @pytest.mark.asyncio
+async def test_run_agent_graph_iron_man_theme_uses_melody_subagent():
+    """Theme/artist 'sounds like' requests compose via melody subagent."""
+    mock_client = AsyncMock(spec=MCPClient)
+    mock_session = AsyncMock()
+    mock_client.session = mock_session
+    mock_result = MagicMock()
+    mock_result.isError = False
+    mock_result.content = [MagicMock(text='{"config":{"tempoBpm":120,"timeSignature":"4/4"}}')]
+    mock_session.call_tool.return_value = mock_result
+    mock_client._extract_tool_result = lambda x: x.content[0].text if hasattr(x, "content") else x
+    mock_client.run_scoped_tool_loop.return_value = "Added a slow B minor riff in the spirit of heavy metal."
+    mock_client.run_llm_tool_loop.return_value = (
+        "I added a slow heavy riff in the spirit of that classic metal feel.",
+        None,
+    )
+
+    reply, music = await run_agent_graph(
+        mock_client,
+        query="make it sound like the Iron Man theme",
+        history=[],
+    )
+
+    assert "spirit" in reply.lower() or "riff" in reply.lower() or "metal" in reply.lower()
+    mock_client.run_scoped_tool_loop.assert_called_once()
+    mock_client.session.call_tool.assert_called()
+
+
+@pytest.mark.asyncio
 async def test_run_agent_graph_drum_beat_uses_melody_subagent():
     """Drum/groove composition routes to melody subagent even when style is mentioned."""
     mock_client = AsyncMock(spec=MCPClient)
@@ -186,7 +214,7 @@ async def test_style_pattern_matching():
 
 
 def test_route_after_precall_precedence():
-    """Audio intent beats melody; melody beats style fallback."""
+    """Audio intent beats melody; reference compose beats style-only routing."""
     assert (
         route_after_precall({"current_query": "generate a bassline with elevenlabs vocals"})
         == "run_llm_tools"
@@ -197,6 +225,14 @@ def test_route_after_precall_precedence():
     )
     assert (
         route_after_precall({"current_query": "make a drum beat in the style of Daft Punk"})
+        == "generate_midi_melody"
+    )
+    assert (
+        route_after_precall({"current_query": "make it sound like the Iron Man theme"})
+        == "generate_midi_melody"
+    )
+    assert (
+        route_after_precall({"current_query": "in the spirit of Black Sabbath"})
         == "generate_midi_melody"
     )
     assert (

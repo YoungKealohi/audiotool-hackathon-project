@@ -13,7 +13,6 @@ LangGraph StateGraph so that:
 
 from __future__ import annotations
 
-import os
 import re
 import json
 import uuid
@@ -22,6 +21,10 @@ from typing import Any, Dict, Optional, Sequence, TypedDict
 from langgraph.graph import END, StateGraph
 
 from .mcp_client_new import MCPClient
+from .melody_skill_bundle import (
+    REFERENCE_COMPOSE_PATTERNS,
+    build_melody_skills_block,
+)
 from .project_config_intent import parse_update_project_config_args
 
 
@@ -95,7 +98,6 @@ AUDIO_INTENT_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-
 MELODY_SUBAGENT_SYSTEM = (
     "# Role\n"
     "You are the Nexus Melody/MIDI subagent. Generate and insert musically strong MIDI parts "
@@ -142,8 +144,7 @@ MELODY_SUBAGENT_SYSTEM = (
     "# Context\n"
     "{context_block}\n\n"
 
-    "# Strudel skill\n"
-    "{strudel_skill}\n"
+    "{skills_block}\n"
 )
 
 
@@ -154,17 +155,6 @@ _MISSING_CONTEXT_BLOCK = (
     "that matches the user's stated genre or mood, and explain the choice in your "
     "one-sentence reply. Never skip the inspection step when context is missing."
 )
-
-
-def _load_melody_skill(filename: str) -> str:
-    """Load a single skill markdown file for the melody subagent."""
-    path = os.path.join(os.path.dirname(__file__), "skills", filename)
-    try:
-        with open(path, encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError as exc:
-        print(f"[graph] Failed to load melody skill {filename}: {exc}")
-        return ""
 
 
 def _build_melody_context_block(daw_context: Optional[Dict[str, Any]]) -> str:
@@ -323,7 +313,7 @@ async def generate_midi_melody(state: AgentState) -> dict:
 
     system_prompt = MELODY_SUBAGENT_SYSTEM.format(
         context_block=_build_melody_context_block(daw_context),
-        strudel_skill=_load_melody_skill("09_strudel.md"),
+        skills_block=build_melody_skills_block(query),
     )
 
     try:
@@ -416,9 +406,10 @@ def route_after_precall(state: AgentState) -> str:
        the main tool loop so the ``07_audio_macros`` skill handles them
        (presets / EQ / stompbox on existing channels) instead of the synth
        recommender adding a new device.
-    3. Melody/MIDI intent routes to the ``generate_midi_melody`` subagent.
-    4. Style/vibe intent routes to the existing synth recommender.
-    5. Otherwise fall through to the main tool-calling loop.
+    3. Reference / \"sounds like\" compose requests route to the melody subagent.
+    4. Other melody/MIDI intent routes to the ``generate_midi_melody`` subagent.
+    5. Style/vibe intent (device-only) routes to the existing synth recommender.
+    6. Otherwise fall through to the main tool-calling loop.
     """
     query = state.get("current_query", "")
     if AUDIO_INTENT_PATTERNS.search(query):
@@ -427,6 +418,8 @@ def route_after_precall(state: AgentState) -> str:
         return "run_llm_tools"
     if AUDIO_SHAPING_PATTERNS.search(query):
         return "run_llm_tools"
+    if REFERENCE_COMPOSE_PATTERNS.search(query):
+        return "generate_midi_melody"
     if MELODY_PATTERNS.search(query):
         return "generate_midi_melody"
     if STYLE_PATTERNS.search(query):

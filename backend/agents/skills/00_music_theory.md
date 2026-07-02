@@ -12,8 +12,9 @@ Use this when the user asks for feedback, ideas, "what should I change?", or arr
 1. Call `get-project-summary` and `export-tracks-abc` in parallel before musical feedback.
 2. **Diagnose** using Tonal-style analysis: likely key/scale (`Scale.detect`), chord names (`Chord.detect`), progression (`Progression.toRomanNumerals`), diatonic options (`Key.majorKey` / `Key.minorKey`).
 3. **Prescribe** 1–3 prioritized suggestions, each tied to Audiotool actions (new notes, chord swap, layer add/remove, `update-project-config`).
-4. Respect intentional minimalism; explain *effect*, not jargon dumps.
-5. Max 3 concrete suggestions per reply unless they ask for a full critique.
+4. If they name an **artist or theme** and want it to match, use **`10_reference_styles.md`** — decompose feel/structure and implement with Strudel (`add-strudel-track`), **in the spirit of** only.
+5. Respect intentional minimalism; explain *effect*, not jargon dumps.
+6. Max 3 concrete suggestions per reply unless they ask for a full critique.
 
 ## Scales and modes (genre palette)
 
